@@ -20,7 +20,44 @@ import { Button } from "ui/button";
 import { useTranslations } from "next-intl";
 import { ChatMetadata } from "app-types/chat";
 import { DefaultToolName } from "lib/ai/tools";
-import { PlanDataPartSchema, PlanToolOutputSchema } from "app-types/plan";
+import {
+  OutlineDataPartSchema,
+  PlanDataPartSchema,
+  PlanStepOutputDataPartSchema,
+  PlanToolOutputSchema,
+  PlanActionSchema,
+} from "app-types/plan";
+import { z } from "zod";
+
+const LenientPlanStepSchema = z.object({
+  title: z.string().optional(),
+  description: z.string().optional(),
+  actions: z.array(PlanActionSchema).optional(),
+});
+
+const LenientPlanToolOutputSchema = z.object({
+  title: z.string().optional(),
+  description: z.string().optional(),
+  steps: z.array(LenientPlanStepSchema).optional().default([]),
+});
+
+function getPlanStepOutputs(
+  messageParts: UIMessage["parts"] | undefined,
+  planId: string,
+) {
+  const outputsByStepIndex: Array<Array<{ toolName?: string; output: unknown }>> =
+    [];
+  if (!messageParts) return outputsByStepIndex;
+  for (const part of messageParts) {
+    const parsed = PlanStepOutputDataPartSchema.safeParse(part);
+    if (!parsed.success) continue;
+    if ((parsed.data.id ?? parsed.data.data.planId) !== planId) continue;
+    const { stepIndex, toolName, output } = parsed.data.data;
+    outputsByStepIndex[stepIndex] ??= [];
+    outputsByStepIndex[stepIndex]!.push({ toolName, output });
+  }
+  return outputsByStepIndex;
+}
 
 type MessagePart = UIMessage["parts"][number];
 
@@ -71,6 +108,10 @@ const PurePreviewMessage = ({
     () => partsForDisplay.some((p) => p.type === "data-plan"),
     [partsForDisplay],
   );
+  const hasDataOutline = useMemo(
+    () => partsForDisplay.some((p) => p.type === "data-outline"),
+    [partsForDisplay],
+  );
 
   if (message.role == "system") {
     return null; // system message is not shown
@@ -90,6 +131,27 @@ const PurePreviewMessage = ({
             const key = `message-${messageIndex}-part-${part.type}-${index}`;
             const isLastPart = index === partsForDisplay.length - 1;
 
+            const parsedOutlinePart = OutlineDataPartSchema.safeParse(part);
+            if (parsedOutlinePart.success) {
+              const outlineId =
+                parsedOutlinePart.data.id ??
+                (typeof parsedOutlinePart.data.data.title === "string"
+                  ? `${message.id}:${parsedOutlinePart.data.data.title}`
+                  : message.id);
+              const progress = getLatestPlanProgress(partsForDisplay, outlineId);
+              const stepOutputs = getPlanStepOutputs(partsForDisplay, outlineId);
+              return (
+                <PlanMessagePart
+                  key={key}
+                  plan={parsedOutlinePart.data.data}
+                  planId={outlineId}
+                  progress={progress}
+                  stepOutputs={stepOutputs}
+                  isStreaming={false}
+                />
+              );
+            }
+
             const parsedPlanPart = PlanDataPartSchema.safeParse(part);
             if (parsedPlanPart.success) {
               const planId =
@@ -99,6 +161,7 @@ const PurePreviewMessage = ({
                   : message.id);
               
               const progress = getLatestPlanProgress(partsForDisplay, planId);
+              const stepOutputs = getPlanStepOutputs(partsForDisplay, planId);
 
               return (
                 <PlanMessagePart
@@ -106,12 +169,16 @@ const PurePreviewMessage = ({
                   plan={parsedPlanPart.data.data}
                   planId={planId}
                   progress={progress}
+                  stepOutputs={stepOutputs}
                   isStreaming={false}
                 />
               );
             }
 
             if (part.type === "data-plan-progress") {
+              return null;
+            }
+            if (part.type === "data-plan-step-output") {
               return null;
             }
 
@@ -169,20 +236,53 @@ const PurePreviewMessage = ({
               }
 
               if (toolName === DefaultToolName.Plan) {
-                if (hasDataPlan) return null;
-                const parsed = PlanToolOutputSchema.safeParse(part.input);
+                if (hasDataPlan || hasDataOutline) return null;
+                
+                // Try strict parsing first
+                let parsed = PlanToolOutputSchema.safeParse(part.input);
+                
+                // If strict parsing fails, try lenient parsing for streaming/partial data
+                if (!parsed.success) {
+                   const lenientParsed = LenientPlanToolOutputSchema.safeParse(part.input);
+                   if (lenientParsed.success) {
+                      // Treat partial data as valid enough for display
+                      parsed = lenientParsed as any;
+                   }
+                }
+
+                const progress = getLatestPlanProgress(
+                  partsForDisplay,
+                  part.toolCallId,
+                );
+                const stepOutputs = getPlanStepOutputs(
+                  partsForDisplay,
+                  part.toolCallId,
+                );
+
                 if (parsed.success) {
-                  const progress = getLatestPlanProgress(partsForDisplay, part.toolCallId);
                   return (
                     <PlanMessagePart
                       key={key}
                       plan={parsed.data}
                       planId={part.toolCallId}
                       progress={progress}
+                       stepOutputs={stepOutputs}
                       isStreaming={!part.state.startsWith("output")}
                     />
                   );
                 }
+                
+                // Fallback for when parsing fails completely but we still want to show something
+                return (
+                  <PlanMessagePart
+                    key={key}
+                    plan={{}}
+                    planId={part.toolCallId}
+                    progress={progress}
+                    stepOutputs={stepOutputs}
+                    isStreaming={true}
+                  />
+                );
               }
               const isLast = isLastMessage && isLastPart;
               const isManualToolInvocation =

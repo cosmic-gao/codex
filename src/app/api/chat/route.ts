@@ -26,7 +26,7 @@ import {
   ChatMetadata,
 } from "app-types/chat";
 import { DefaultToolName } from "lib/ai/tools";
-import { PlanToolOutputSchema } from "app-types/plan";
+import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
 
 import { errorIf, safe } from "ts-safe";
 
@@ -100,7 +100,10 @@ export async function POST(request: Request) {
     const messages: UIMessage[] = (thread?.messages ?? []).map((m) => {
       const parts = m.parts.filter(
         (part): part is UIMessage["parts"][number] =>
-          part.type !== "data-plan" && part.type !== "data-plan-progress",
+          part.type !== "data-plan" &&
+          part.type !== "data-plan-progress" &&
+          part.type !== "data-outline" &&
+          part.type !== "data-plan-step-output",
       );
       return {
         id: m.id,
@@ -221,6 +224,7 @@ export async function POST(request: Request) {
           }
         >();
         let activePlanId: string | undefined;
+        const emittedPlanIds = new Set<string>();
 
         const mcpClients = await mcpClientsManager.getClients();
         const mcpTools = await mcpClientsManager.tools();
@@ -298,6 +302,12 @@ export async function POST(request: Request) {
           !supportToolCall && buildToolCallUnsupportedModelSystemPrompt,
         );
 
+        const messageText = message.parts
+          .filter((p): p is Extract<(typeof message.parts)[number], { type: "text" }> => p.type === "text")
+          .map((p) => p.text)
+          .join("\n");
+        const forcePlanFirst = /计划|规划|plan/i.test(messageText);
+
         const IMAGE_TOOL: Record<string, Tool> = useImageTool
           ? {
               [ImageToolName]:
@@ -345,6 +355,372 @@ export async function POST(request: Request) {
         }
         logger.info(`model: ${chatModel?.provider}/${chatModel?.model}`);
 
+        const writeOutlineSnapshot = (outlineId: string, outline: any) => {
+          if (emittedPlanIds.has(outlineId)) return;
+          emittedPlanIds.add(outlineId);
+          activePlanId = outlineId;
+          const steps = (outline.steps ?? []).map(() => ({
+            status: "pending" as const,
+          }));
+          const snapshot = {
+            planId: outlineId,
+            steps,
+            currentStepIndex: steps.length ? 0 : undefined,
+          };
+          planProgressStore.set(outlineId, snapshot);
+          dataStream.write({
+            type: "data-outline",
+            id: outlineId,
+            data: outline,
+          });
+          dataStream.write({
+            type: "data-plan-progress",
+            id: outlineId,
+            data: snapshot,
+          });
+        };
+
+        const writePlanSnapshot = (planId: string, plan: any) => {
+          if (emittedPlanIds.has(planId)) return;
+          emittedPlanIds.add(planId);
+          activePlanId = planId;
+          const steps = (plan.steps ?? []).map(() => ({
+            status: "pending" as const,
+          }));
+          const snapshot = {
+            planId,
+            steps,
+            currentStepIndex: steps.length ? 0 : undefined,
+          };
+          planProgressStore.set(planId, snapshot);
+          dataStream.write({
+            type: "data-plan",
+            id: planId,
+            data: plan,
+          });
+          dataStream.write({
+            type: "data-plan-progress",
+            id: planId,
+            data: snapshot,
+          });
+        };
+
+        const toolNameByToolCallId = new Map<string, string>();
+        let isExplicitPlanProgress = false;
+        let stepIndexForStepOutput: number | undefined;
+
+        if (forcePlanFirst && vercelAITooles[DefaultToolName.Outline]) {
+          const outlineAbort = new AbortController();
+          if (request.signal.aborted) outlineAbort.abort();
+          else
+            request.signal.addEventListener("abort", () => outlineAbort.abort(), {
+              once: true,
+            });
+
+          const outlineOnlyResult = streamText({
+            model,
+            system:
+              systemPrompt +
+              `\n\n你必须先调用 outline 工具输出完整的大纲步骤列表，然后停止。不要在生成大纲的同时执行任何步骤。大纲只包含 title、description、steps（steps 只包含 title、description）。`,
+            messages: await convertToModelMessages(messages),
+            experimental_transform: smoothStream({ chunking: "word" }),
+            maxRetries: 2,
+            tools: {
+              [DefaultToolName.Outline]: vercelAITooles[DefaultToolName.Outline],
+            },
+            stopWhen: stepCountIs(1),
+            toolChoice: "auto",
+            abortSignal: outlineAbort.signal,
+          });
+          outlineOnlyResult.consumeStream();
+          const outlineReader = outlineOnlyResult.toUIMessageStream().getReader();
+
+          let outlineId: string | undefined;
+          let outlineData: unknown | undefined;
+          try {
+            while (true) {
+              const { done, value } = await outlineReader.read();
+              if (done) break;
+              if (value.type !== "tool-input-available") continue;
+              if (value.toolName !== DefaultToolName.Outline) continue;
+              const parsed = OutlineToolOutputSchema.safeParse(value.input);
+              if (!parsed.success) continue;
+              outlineId = value.toolCallId;
+              outlineData = parsed.data;
+              outlineAbort.abort();
+              break;
+            }
+          } finally {
+            try {
+              outlineReader.releaseLock();
+            } catch {}
+          }
+
+          if (outlineId && outlineData) {
+            writeOutlineSnapshot(outlineId, outlineData);
+            const outlineJson = JSON.stringify(outlineData);
+            const { [DefaultToolName.Outline]: _outlineTool, ...executionTools } =
+              vercelAITooles;
+
+            const executionResult = streamText({
+              model,
+              system:
+                systemPrompt +
+                `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n\n现在开始按该大纲逐步执行：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 update-plan-progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步结束后调用 update-plan-progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 每步需要调用其它工具产出内容（例如搜索/HTTP/代码执行/工作流等），并让工具输出作为该步骤的详情\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要调用 outline/plan 工具，也不要改写 steps 内容，只更新进度\n`,
+              messages: await convertToModelMessages(messages),
+              experimental_transform: smoothStream({ chunking: "word" }),
+              maxRetries: 2,
+              tools: executionTools,
+              stopWhen: stepCountIs(10),
+              toolChoice: "auto",
+              abortSignal: request.signal,
+            });
+            executionResult.consumeStream();
+
+            const uiStream = executionResult.toUIMessageStream({
+              messageMetadata: ({ part }) => {
+                if (part.type == "finish") {
+                  metadata.usage = part.totalUsage;
+                  return metadata;
+                }
+              },
+            });
+
+            const tapped = uiStream.pipeThrough(
+              new TransformStream({
+                transform(chunk, controller) {
+                  if (chunk.type === "tool-input-available") {
+                    toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
+                    if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                      isExplicitPlanProgress = true;
+                      const input = chunk.input as any;
+                      if (typeof input?.currentStepIndex === "number") {
+                        stepIndexForStepOutput = input.currentStepIndex;
+                      } else if (typeof input?.stepIndex === "number") {
+                        stepIndexForStepOutput = input.stepIndex;
+                      }
+                    } else if (!isExplicitPlanProgress && activePlanId) {
+                      const current = planProgressStore.get(activePlanId);
+                      if (current?.currentStepIndex !== undefined) {
+                        const idx = current.currentStepIndex;
+                        if (current.steps[idx]?.status === "pending") {
+                          current.steps[idx] = { status: "in_progress" };
+                          dataStream.write({
+                            type: "data-plan-progress",
+                            id: activePlanId,
+                            data: current,
+                          });
+                        }
+                      }
+                    }
+                  } else if (
+                    chunk.type === "tool-output-available" ||
+                    chunk.type === "tool-output-error"
+                  ) {
+                    const toolName = toolNameByToolCallId.get(chunk.toolCallId);
+                    const isProgressTool =
+                      toolName === DefaultToolName.UpdatePlanProgress;
+                    const isOutlineOrPlanTool =
+                      toolName === DefaultToolName.Outline ||
+                      toolName === DefaultToolName.Plan;
+                    if (!isProgressTool && !isOutlineOrPlanTool && activePlanId) {
+                      const current = planProgressStore.get(activePlanId);
+                      const idx =
+                        stepIndexForStepOutput ?? current?.currentStepIndex;
+                      if (idx !== undefined) {
+                        const output =
+                          (chunk as any).output ??
+                          (chunk as any).error ??
+                          undefined;
+                        dataStream.write({
+                          type: "data-plan-step-output",
+                          id: activePlanId,
+                          data: {
+                            planId: activePlanId,
+                            stepIndex: idx,
+                            toolName,
+                            output,
+                          },
+                        });
+                      }
+                    }
+                    if (!isProgressTool && !isExplicitPlanProgress && activePlanId) {
+                      const current = planProgressStore.get(activePlanId);
+                      if (current?.currentStepIndex !== undefined) {
+                        const idx = current.currentStepIndex;
+                        const status =
+                          chunk.type === "tool-output-error"
+                            ? ("failed" as const)
+                            : ("completed" as const);
+                        current.steps[idx] = { status };
+                        const nextIndex =
+                          idx + 1 < current.steps.length ? idx + 1 : undefined;
+                        current.currentStepIndex = nextIndex;
+                        if (nextIndex !== undefined) {
+                          const nextStatus = current.steps[nextIndex]?.status;
+                          if (nextStatus === "pending") {
+                            current.steps[nextIndex] = { status: "in_progress" };
+                          }
+                        }
+                        dataStream.write({
+                          type: "data-plan-progress",
+                          id: activePlanId,
+                          data: current,
+                        });
+                      }
+                    }
+                  }
+
+                  controller.enqueue(chunk);
+                },
+              }),
+            );
+
+            dataStream.merge(tapped);
+            return;
+          }
+        } else if (forcePlanFirst && vercelAITooles[DefaultToolName.Plan]) {
+          const planAbort = new AbortController();
+          if (request.signal.aborted) planAbort.abort();
+          else
+            request.signal.addEventListener("abort", () => planAbort.abort(), {
+              once: true,
+            });
+
+          const planOnlyResult = streamText({
+            model,
+            system:
+              systemPrompt +
+              `\n\n你必须先调用 plan 工具输出完整的步骤列表，然后停止。不要在生成计划的同时执行任何步骤。在 plan 工具中，只生成 title 和 description，不要生成 actions。`,
+            messages: await convertToModelMessages(messages),
+            experimental_transform: smoothStream({ chunking: "word" }),
+            maxRetries: 2,
+            tools: { [DefaultToolName.Plan]: vercelAITooles[DefaultToolName.Plan] },
+            stopWhen: stepCountIs(1),
+            toolChoice: "auto",
+            abortSignal: planAbort.signal,
+          });
+          planOnlyResult.consumeStream();
+          const planReader = planOnlyResult.toUIMessageStream().getReader();
+
+          let planId: string | undefined;
+          let planData: unknown | undefined;
+          try {
+            while (true) {
+              const { done, value } = await planReader.read();
+              if (done) break;
+              if (value.type !== "tool-input-available") continue;
+              if (value.toolName !== DefaultToolName.Plan) continue;
+              const parsed = PlanToolOutputSchema.safeParse(value.input);
+              if (!parsed.success) continue;
+              planId = value.toolCallId;
+              planData = parsed.data;
+              planAbort.abort();
+              break;
+            }
+          } finally {
+            try {
+              planReader.releaseLock();
+            } catch {}
+          }
+
+          if (planId && planData) {
+            writePlanSnapshot(planId, planData);
+            const planJson = JSON.stringify(planData);
+            const { [DefaultToolName.Plan]: _planTool, ...executionTools } =
+              vercelAITooles;
+
+            const executionResult = streamText({
+              model,
+              system:
+                systemPrompt +
+                `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n\n现在开始执行该计划：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 update-plan-progress：{ planId:\"${planId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步完成后调用 update-plan-progress：{ planId:\"${planId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要再次调用 plan 工具，也不要改写 steps 内容，只更新进度\n`,
+              messages: await convertToModelMessages(messages),
+              experimental_transform: smoothStream({ chunking: "word" }),
+              maxRetries: 2,
+              tools: executionTools,
+              stopWhen: stepCountIs(10),
+              toolChoice: "auto",
+              abortSignal: request.signal,
+            });
+            executionResult.consumeStream();
+
+            const uiStream = executionResult.toUIMessageStream({
+              messageMetadata: ({ part }) => {
+                if (part.type == "finish") {
+                  metadata.usage = part.totalUsage;
+                  return metadata;
+                }
+              },
+            });
+
+            const tapped = uiStream.pipeThrough(
+              new TransformStream({
+                transform(chunk, controller) {
+                  if (chunk.type === "tool-input-available") {
+                    toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
+                    if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                      isExplicitPlanProgress = true;
+                      const input = chunk.input as any;
+                      if (typeof input?.currentStepIndex === "number") {
+                        stepIndexForStepOutput = input.currentStepIndex;
+                      } else if (typeof input?.stepIndex === "number") {
+                        stepIndexForStepOutput = input.stepIndex;
+                      }
+                    } else if (!isExplicitPlanProgress && activePlanId) {
+                      const current = planProgressStore.get(activePlanId);
+                      if (current?.currentStepIndex !== undefined) {
+                        const idx = current.currentStepIndex;
+                        if (current.steps[idx]?.status === "pending") {
+                          current.steps[idx] = { status: "in_progress" };
+                          dataStream.write({
+                            type: "data-plan-progress",
+                            id: activePlanId,
+                            data: current,
+                          });
+                        }
+                      }
+                    }
+                  } else if (
+                    chunk.type === "tool-output-available" ||
+                    chunk.type === "tool-output-error"
+                  ) {
+                    const toolName = toolNameByToolCallId.get(chunk.toolCallId);
+                    const isProgressTool =
+                      toolName === DefaultToolName.UpdatePlanProgress;
+                    if (!isProgressTool && activePlanId) {
+                      const current = planProgressStore.get(activePlanId);
+                      const idx =
+                        stepIndexForStepOutput ?? current?.currentStepIndex;
+                      if (idx !== undefined) {
+                        const output =
+                          (chunk as any).output ??
+                          (chunk as any).error ??
+                          undefined;
+                        dataStream.write({
+                          type: "data-plan-step-output",
+                          id: activePlanId,
+                          data: {
+                            planId: activePlanId,
+                            stepIndex: idx,
+                            toolName,
+                            output,
+                          },
+                        });
+                      }
+                    }
+                  }
+
+                  controller.enqueue(chunk);
+                },
+              }),
+            );
+
+            dataStream.merge(tapped);
+            return;
+          }
+        }
+
         const result = streamText({
           model,
           system: systemPrompt,
@@ -357,7 +733,6 @@ export async function POST(request: Request) {
           abortSignal: request.signal,
         });
         result.consumeStream();
-        const toolNameByToolCallId = new Map<string, string>();
 
         const uiStream = result.toUIMessageStream({
           messageMetadata: ({ part }) => {
@@ -377,33 +752,18 @@ export async function POST(request: Request) {
                 if (chunk.toolName === DefaultToolName.Plan) {
                   const parsed = PlanToolOutputSchema.safeParse(chunk.input);
                   if (parsed.success) {
-                    const planId = chunk.toolCallId;
-                    activePlanId = planId;
-                    const steps = parsed.data.steps.map(() => ({
-                      status: "pending" as const,
-                    }));
-                    const snapshot = {
-                      planId,
-                      steps,
-                      currentStepIndex: steps.length ? 0 : undefined,
-                    };
-                      planProgressStore.set(planId, snapshot);
-                      dataStream.write({
-                        type: "data-plan",
-                        id: planId,
-                        data: parsed.data,
-                      });
-                    dataStream.write({
-                      type: "data-plan-progress",
-                      id: planId,
-                      data: snapshot,
-                    });
+                    writePlanSnapshot(chunk.toolCallId, parsed.data);
                   }
-                } else if (
-                    chunk.toolName !== DefaultToolName.UpdatePlanProgress &&
-                  activePlanId
-                ) {
-                    const current = planProgressStore.get(activePlanId);
+                } else if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                  isExplicitPlanProgress = true;
+                  const input = chunk.input as any;
+                  if (typeof input?.currentStepIndex === "number") {
+                    stepIndexForStepOutput = input.currentStepIndex;
+                  } else if (typeof input?.stepIndex === "number") {
+                    stepIndexForStepOutput = input.stepIndex;
+                  }
+                } else if (!isExplicitPlanProgress && activePlanId) {
+                  const current = planProgressStore.get(activePlanId);
                   if (current?.currentStepIndex !== undefined) {
                     const idx = current.currentStepIndex;
                     if (current.steps[idx]?.status === "pending") {
@@ -422,10 +782,33 @@ export async function POST(request: Request) {
               ) {
                 const toolName = toolNameByToolCallId.get(chunk.toolCallId);
                 const isProgressTool =
-                    toolName === DefaultToolName.UpdatePlanProgress;
+                  toolName === DefaultToolName.UpdatePlanProgress;
                 const isPlanTool = toolName === DefaultToolName.Plan;
-                if (!isPlanTool && !isProgressTool && activePlanId) {
-                    const current = planProgressStore.get(activePlanId);
+                if (!isProgressTool && !isPlanTool && activePlanId) {
+                  const current = planProgressStore.get(activePlanId);
+                  const idx = stepIndexForStepOutput ?? current?.currentStepIndex;
+                  if (idx !== undefined) {
+                    const output =
+                      (chunk as any).output ?? (chunk as any).error ?? undefined;
+                    dataStream.write({
+                      type: "data-plan-step-output",
+                      id: activePlanId,
+                      data: {
+                        planId: activePlanId,
+                        stepIndex: idx,
+                        toolName,
+                        output,
+                      },
+                    });
+                  }
+                }
+                if (
+                  !isPlanTool &&
+                  !isProgressTool &&
+                  !isExplicitPlanProgress &&
+                  activePlanId
+                ) {
+                  const current = planProgressStore.get(activePlanId);
                   if (current?.currentStepIndex !== undefined) {
                     const idx = current.currentStepIndex;
                     const status =

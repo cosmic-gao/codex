@@ -3,6 +3,7 @@ import { createBarChartTool } from "./visualization/create-bar-chart";
 import { createLineChartTool } from "./visualization/create-line-chart";
 import { createTableTool } from "./visualization/create-table";
 import { planTool } from "./planning/plan";
+import { outlineTool } from "./planning/outline";
 import { updatePlanProgressTool } from "./planning/update-plan-progress";
 import { exaSearchTool, exaContentsTool } from "./web/web-search";
 import { AppDefaultToolkit, DefaultToolName } from ".";
@@ -20,6 +21,7 @@ export const APP_DEFAULT_TOOL_KIT: Record<
     [DefaultToolName.CreateBarChart]: createBarChartTool,
     [DefaultToolName.CreateLineChart]: createLineChartTool,
     [DefaultToolName.CreateTable]: createTableTool,
+    [DefaultToolName.Outline]: outlineTool,
     [DefaultToolName.Plan]: planTool,
     [DefaultToolName.UpdatePlanProgress]: updatePlanProgressTool,
   },

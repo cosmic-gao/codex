@@ -40,8 +40,8 @@ import { NodeKind } from "lib/ai/workflow/workflow.interface";
 import { mcpClientsManager } from "lib/ai/mcp/mcp-manager";
 import { APP_DEFAULT_TOOL_KIT } from "lib/ai/tools/tool-kit";
 import { AppDefaultToolkit, DefaultToolName } from "lib/ai/tools";
-import { UpdatePlanProgressInputSchema } from "lib/ai/tools/planning/update-plan-progress";
-import { PlanToolOutputSchema } from "app-types/plan";
+import { UpdatePlanProgressInputSchema, UpdatePlanProgressInput } from "lib/ai/tools/planning/update-plan-progress";
+import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
 
 function stripProviderMetadata<P extends UIMessage["parts"][number]>(part: P): P {
   const withMetadata = part as unknown as P & {
@@ -449,6 +449,7 @@ export const loadAppDefaultTools = (opt?: {
       planId: string;
       steps: Array<{
         status: "pending" | "in_progress" | "completed" | "failed";
+        actions?: { label: string; value?: string }[];
       }>;
       currentStepIndex?: number;
     }
@@ -470,21 +471,30 @@ export const loadAppDefaultTools = (opt?: {
           [DefaultToolName.UpdatePlanProgress]: createTool({
             description: selected[DefaultToolName.UpdatePlanProgress]!.description,
             inputSchema: UpdatePlanProgressInputSchema,
-            execute: async (input) => {
+            execute: async (input: UpdatePlanProgressInput) => {
               const planId = input.planId;
               opt.setActivePlanId?.(planId);
 
               const current = store.get(planId) ?? {
                 planId,
-                steps: [],
+                steps: [] as {
+                  status: "pending" | "in_progress" | "completed" | "failed";
+                  actions?: { label: string; value?: string }[];
+                }[],
                 currentStepIndex: undefined,
               };
 
-              if (input.stepIndex !== undefined && input.status !== undefined) {
+              if (input.stepIndex !== undefined) {
                 while (current.steps.length <= input.stepIndex) {
                   current.steps.push({ status: "pending" });
                 }
-                current.steps[input.stepIndex] = { status: input.status };
+                const step = current.steps[input.stepIndex];
+                if (input.status !== undefined) {
+                  step.status = input.status;
+                }
+                if (input.actions !== undefined) {
+                  step.actions = input.actions;
+                }
               }
 
               if (input.currentStepIndex !== undefined) {
@@ -542,6 +552,16 @@ export const convertToSavePart = (
 
   if (isToolUIPart(v) && v.state === "output-available") {
     const toolName = getToolName(v);
+    if (toolName === DefaultToolName.Outline) {
+      const parsed = OutlineToolOutputSchema.safeParse(v.input);
+      if (parsed.success) {
+        return {
+          type: "data-outline" as const,
+          id: v.toolCallId,
+          data: parsed.data,
+        };
+      }
+    }
     if (toolName === DefaultToolName.Plan) {
       const parsed = PlanToolOutputSchema.safeParse(v.input);
       if (parsed.success) {

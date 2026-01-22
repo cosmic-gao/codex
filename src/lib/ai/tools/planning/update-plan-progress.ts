@@ -1,6 +1,8 @@
 import { tool as createTool } from "ai";
 import { z } from "zod";
 
+import { PlanActionSchema } from "app-types/plan";
+
 export const UpdatePlanProgressInputSchema = z.object({
   planId: z
     .string()
@@ -17,6 +19,10 @@ export const UpdatePlanProgressInputSchema = z.object({
     .enum(["pending", "in_progress", "completed", "failed"])
     .optional()
     .describe("New status for the step."),
+  actions: z
+    .array(PlanActionSchema)
+    .optional()
+    .describe("Execution results or details generated during this step."),
   currentStepIndex: z
     .number()
     .int()
