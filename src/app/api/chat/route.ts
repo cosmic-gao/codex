@@ -291,10 +291,18 @@ export async function POST(request: Request) {
           const now = Date.now();
 
           if (stepUpdate.status === "in_progress") {
+            for (let index = 0; index < current.steps.length; index += 1) {
+              if (index === stepUpdate.stepIndex) continue;
+              const step = current.steps[index];
+              if (!step) continue;
+              if (step.status !== "in_progress") continue;
+              current.steps[index] = {
+                status: "pending",
+              };
+            }
             current.steps[stepUpdate.stepIndex] = {
-              ...prev,
               status: "in_progress",
-              startTime: prev.startTime ?? now,
+              startTime: now,
             };
             current.currentStepIndex = stepUpdate.stepIndex;
           } else if (stepUpdate.status === "completed") {

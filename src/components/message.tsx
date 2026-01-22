@@ -182,6 +182,7 @@ const PurePreviewMessage = ({
                   progress={progress}
                   stepOutputs={stepOutputs}
                   isStreaming={false}
+                  isActive={Boolean(isLastMessage && isLoading)}
                 />
               );
             }
@@ -206,6 +207,7 @@ const PurePreviewMessage = ({
                   progress={progress}
                   stepOutputs={stepOutputs}
                   isStreaming={false}
+                  isActive={Boolean(isLastMessage && isLoading)}
                 />
               );
             }
@@ -312,6 +314,7 @@ const PurePreviewMessage = ({
                     progress={progress}
                     stepOutputs={stepOutputs}
                     isStreaming={isStreaming}
+                    isActive={Boolean(isLastMessage && isLoading)}
                   />
                 );
               }

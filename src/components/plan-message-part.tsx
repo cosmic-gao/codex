@@ -21,6 +21,7 @@ type Props = {
   progress?: PlanProgress;
   stepOutputs?: Array<Array<{ toolName?: string; output: unknown }>>;
   isStreaming?: boolean;
+  isActive?: boolean;
   className?: string;
 };
 
@@ -227,6 +228,7 @@ const PlanStep = ({
   outputs,
   progressStep,
   isCurrent = false,
+  isActive = false,
 }: {
   step: DeepPartial<PlanToolOutput["steps"][number]> | DeepPartial<OutlineToolOutput["steps"][number]>;
   status: StepStatus;
@@ -237,6 +239,7 @@ const PlanStep = ({
   outputs?: Array<{ toolName?: string; output: unknown }>;
   progressStep?: PlanProgress["steps"][number];
   isCurrent?: boolean;
+  isActive?: boolean;
 }) => {
   const [isExpanded, setIsExpanded] = useState(
     status === "in_progress" || Boolean(progressStep?.errorMessage),
@@ -314,18 +317,27 @@ const PlanStep = ({
               {complexityLabel && (
                 <span className={cn(
                   "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold shadow-sm",
-                  complexity === "3" && "bg-gradient-to-r from-orange-500 to-orange-600 text-white",
-                  complexity === "2" && "bg-gradient-to-r from-blue-500 to-blue-600 text-white",
-                  complexity === "1" && "bg-gradient-to-r from-green-500 to-green-600 text-white"
+                  complexity === "3" && "bg-linear-to-r from-orange-500 to-orange-600 text-white",
+                  complexity === "2" && "bg-linear-to-r from-blue-500 to-blue-600 text-white",
+                  complexity === "1" && "bg-linear-to-r from-green-500 to-green-600 text-white"
                 )}>
                   <Zap className="size-3" />
                   {complexityLabel}
                 </span>
               )}
               <DurationText
-                startTime={progressStep?.startTime}
+                startTime={
+                  status === "in_progress" || progressStep?.endTime
+                    ? progressStep?.startTime
+                    : undefined
+                }
                 endTime={progressStep?.endTime}
-                isRunning={status === "in_progress" && Boolean(progressStep?.startTime)}
+                isRunning={
+                  isActive &&
+                  isCurrent &&
+                  status === "in_progress" &&
+                  Boolean(progressStep?.startTime)
+                }
               />
             </div>
             {step.description && !isExpanded && (
@@ -347,67 +359,58 @@ const PlanStep = ({
           />
         </div>
 
-        <AnimatePresence>
-          {isExpanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="overflow-hidden"
-            >
-              <div className="mt-2 space-y-3">
-                {step.description && (
-                  <div className="text-xs text-muted-foreground whitespace-pre-wrap">
-                    {step.description}
-                  </div>
-                )}
-                {displayActions && displayActions.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {displayActions.map((action, i) => (
-                      <div
-                        key={i}
-                        className="inline-flex items-center rounded-full border bg-secondary/50 px-2.5 py-0.5 text-[10px] font-medium text-secondary-foreground transition-colors hover:bg-secondary/70"
-                      >
-                        {action.label}
-                        {action.value && `: ${action.value}`}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {displayOutputs.length > 0 && (
-                  <div className="space-y-2">
-                    {displayOutputs.map((item, i) => {
-                      const raw =
-                        typeof item.output === "string"
-                          ? item.output
-                          : (() => {
-                              try {
-                                return JSON.stringify(item.output, null, 2);
-                              } catch {
-                                return String(item.output);
-                              }
-                            })();
-                      const text = truncateString(raw, 1600);
-                      return (
-                        <div
-                          key={i}
-                          className="rounded-lg border bg-card p-3 shadow-sm"
-                        >
-                          <div className="mb-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                            {item.toolName ?? "tool"}
-                          </div>
-                          <pre className="whitespace-pre-wrap text-xs leading-relaxed font-mono">
-                            {text}
-                          </pre>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+        {isExpanded && (
+          <div className="mt-2 space-y-3">
+            {step.description && (
+              <div className="text-xs text-muted-foreground whitespace-pre-wrap">
+                {step.description}
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            )}
+            {displayActions && displayActions.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {displayActions.map((action, i) => (
+                  <div
+                    key={i}
+                    className="inline-flex items-center rounded-full border bg-secondary/50 px-2.5 py-0.5 text-[10px] font-medium text-secondary-foreground transition-colors hover:bg-secondary/70"
+                  >
+                    {action.label}
+                    {action.value && `: ${action.value}`}
+                  </div>
+                ))}
+              </div>
+            )}
+            {displayOutputs.length > 0 && (
+              <div className="space-y-2">
+                {displayOutputs.map((item, i) => {
+                  const raw =
+                    typeof item.output === "string"
+                      ? item.output
+                      : (() => {
+                          try {
+                            return JSON.stringify(item.output, null, 2);
+                          } catch {
+                            return String(item.output);
+                          }
+                        })();
+                  const text = truncateString(raw, 1600);
+                  return (
+                    <div
+                      key={i}
+                      className="rounded-lg border bg-card p-3 shadow-sm"
+                    >
+                      <div className="mb-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                        {item.toolName ?? "tool"}
+                      </div>
+                      <pre className="whitespace-pre-wrap text-xs leading-relaxed font-mono">
+                        {text}
+                      </pre>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -419,6 +422,7 @@ function PurePlanMessagePart({
   progress: inputProgress,
   stepOutputs,
   isStreaming = false,
+  isActive = false,
   className,
 }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -480,7 +484,7 @@ function PurePlanMessagePart({
   }, [progress.steps]);
 
   const hasFailed = failedCount > 0;
-
+  console.log("hasFailed", hasFailed, "adadasd");
   return (
     <div
       className={cn(
@@ -516,7 +520,7 @@ function PurePlanMessagePart({
                   <PlanDurationText
                     startTime={timingMetrics.startTime}
                     endTime={timingMetrics.endTime}
-                    isRunning={inProgressCount > 0}
+                    isRunning={isActive && inProgressCount > 0}
                   />
                 )}
                 {isStreaming && (
@@ -545,53 +549,44 @@ function PurePlanMessagePart({
         </div>
       </div>
 
-      {/* Content */}
-      <AnimatePresence initial={false}>
-        {!isCollapsed && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="p-4 pt-6">
-              {plan.description && (
-                <p className="mb-6 text-sm text-muted-foreground">
-                  {plan.description}
-                </p>
-              )}
-              <div className="relative pl-2">
-                {steps.map((step, index) => {
-                  const status = toStepStatus(
-                    progress.steps[index]?.status ?? "pending",
-                  );
-                  const actions = progress.steps[index]?.actions;
-                  const outputs = stepOutputs?.[index];
-                  const progressStep = progress.steps[index];
-                  const isCurrent = progress.currentStepIndex === index;
-                  const prevStatus = index > 0 
-                    ? toStepStatus(progress.steps[index - 1]?.status ?? "pending") 
-                    : undefined;
-                  return (
-                    <PlanStep
-                      key={index}
-                      step={step}
-                      status={status}
-                      prevStatus={prevStatus}
-                      index={index}
-                      isLast={index === steps.length - 1}
-                      actions={actions}
-                      outputs={outputs}
-                      progressStep={progressStep}
-                      isCurrent={isCurrent}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {!isCollapsed && (
+        <div className="p-4 pt-6">
+          {plan.description && (
+            <p className="mb-6 text-sm text-muted-foreground">
+              {plan.description}
+            </p>
+          )}
+          <div className="relative pl-2">
+            {steps.map((step, index) => {
+              const status = toStepStatus(
+                progress.steps[index]?.status ?? "pending",
+              );
+              const actions = progress.steps[index]?.actions;
+              const outputs = stepOutputs?.[index];
+              const progressStep = progress.steps[index];
+              const isCurrent = progress.currentStepIndex === index;
+              const prevStatus = index > 0 
+                ? toStepStatus(progress.steps[index - 1]?.status ?? "pending") 
+                : undefined;
+              return (
+                <PlanStep
+                  key={index}
+                  step={step}
+                  status={status}
+                  prevStatus={prevStatus}
+                  index={index}
+                  isLast={index === steps.length - 1}
+                  actions={actions}
+                  outputs={outputs}
+                  progressStep={progressStep}
+                  isCurrent={isCurrent}
+                  isActive={isActive}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -599,6 +594,7 @@ function PurePlanMessagePart({
 export const PlanMessagePart = memo(PurePlanMessagePart, (prev, next) => {
   if (prev.planId !== next.planId) return false;
   if (prev.isStreaming !== next.isStreaming) return false;
+  if (prev.isActive !== next.isActive) return false;
   if (!equal(prev.plan, next.plan)) return false;
   if (!equal(prev.progress, next.progress)) return false;
   if (!equal(prev.stepOutputs, next.stepOutputs)) return false;
