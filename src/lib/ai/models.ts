@@ -1,11 +1,11 @@
 import "server-only";
 
-import { createOllama } from "ollama-ai-provider-v2";
+import { createOllama } from "ai-sdk-ollama";
 import { openai } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
 import { anthropic } from "@ai-sdk/anthropic";
 import { xai } from "@ai-sdk/xai";
-import { LanguageModelV2, openrouter } from "@openrouter/ai-sdk-provider";
+import { openrouter,LanguageModelV3 } from "@openrouter/ai-sdk-provider";
 import { createGroq } from "@ai-sdk/groq";
 import { LanguageModel } from "ai";
 import {
@@ -22,7 +22,7 @@ import {
 } from "./file-support";
 
 const ollama = createOllama({
-  baseURL: process.env.OLLAMA_BASE_URL || "http://localhost:11434/api",
+  baseURL: process.env.OLLAMA_BASE_URL || "http://localhost:11434",
 });
 const groq = createGroq({
   baseURL: process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
@@ -171,7 +171,7 @@ export const isToolCallUnsupportedModel = (model: LanguageModel) => {
   return allUnsupportedModels.has(model);
 };
 
-const isImageInputUnsupportedModel = (model: LanguageModelV2) => {
+const isImageInputUnsupportedModel = (model: LanguageModelV3) => {
   return !Object.values(staticSupportImageInputModels).includes(model);
 };
 
