@@ -43,7 +43,7 @@ export async function POST(request: Request) {
       system: `${buildUserSystemPrompt(session.user, userPreferences)} ${
         instructions ? `\n\n${instructions}` : ""
       }`.trim(),
-      messages: convertToModelMessages(messages),
+      messages: await convertToModelMessages(messages),
       experimental_transform: smoothStream({ chunking: "word" }),
     }).toUIMessageStreamResponse();
   } catch (error: any) {

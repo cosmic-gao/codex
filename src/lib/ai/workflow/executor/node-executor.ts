@@ -114,7 +114,7 @@ export const llmNodeExecutor: NodeExecutor<LLMNodeData> = async ({
   if (isTextResponse) {
     const response = await generateText({
       model,
-      messages: convertToModelMessages(messages),
+      messages: await convertToModelMessages(messages),
     });
     return {
       output: {
@@ -126,7 +126,7 @@ export const llmNodeExecutor: NodeExecutor<LLMNodeData> = async ({
 
   const response = await generateObject({
     model,
-    messages: convertToModelMessages(messages),
+    messages: await convertToModelMessages(messages),
     schema: jsonSchemaToZod(node.outputSchema.properties.answer),
     maxRetries: 3,
   });

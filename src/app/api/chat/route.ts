@@ -325,7 +325,7 @@ export async function POST(request: Request) {
         const result = streamText({
           model,
           system: systemPrompt,
-          messages: convertToModelMessages(messages),
+          messages: await convertToModelMessages(messages),
           experimental_transform: smoothStream({ chunking: "word" }),
           maxRetries: 2,
           tools: vercelAITooles,
