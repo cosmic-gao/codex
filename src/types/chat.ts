@@ -41,6 +41,7 @@ export type ChatMessage = {
   metadata?: ChatMetadata;
   createdAt: Date;
 };
+export type ChatUIMessage = UIMessage<ChatMetadata>;
 
 export const ChatMentionSchema = z.discriminatedUnion("type", [
   z.object({
@@ -95,7 +96,7 @@ export type ChatMention = z.infer<typeof ChatMentionSchema>;
 
 export const chatApiSchemaRequestBodySchema = z.object({
   id: z.string(),
-  message: z.any() as z.ZodType<UIMessage>,
+  message: z.unknown() as z.ZodType<UIMessage>,
   chatModel: z
     .object({
       provider: z.string(),

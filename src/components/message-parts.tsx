@@ -1,6 +1,12 @@
 "use client";
 
-import { FileUIPart, getToolName, ToolUIPart, UIMessage } from "ai";
+import {
+  FileUIPart,
+  getToolName,
+  ToolUIPart,
+  UIMessage,
+  type DynamicToolUIPart,
+} from "ai";
 import {
   Check,
   Copy,
@@ -68,6 +74,11 @@ import { BACKGROUND_COLORS, EMOJI_DATA } from "lib/const";
 type MessagePart = UIMessage["parts"][number];
 type TextMessagePart = Extract<MessagePart, { type: "text" }>;
 type AssistMessagePart = Extract<MessagePart, { type: "text" }>;
+type ToolPart = ToolUIPart | DynamicToolUIPart;
+
+function isDynamicToolPart(part: ToolPart): part is DynamicToolUIPart {
+  return part.type === "dynamic-tool";
+}
 
 interface UserMessagePartProps {
   part: TextMessagePart;
@@ -95,7 +106,7 @@ interface AssistMessagePartProps {
 }
 
 interface ToolMessagePartProps {
-  part: ToolUIPart;
+  part: ToolUIPart | DynamicToolUIPart;
   messageId: string;
   showActions: boolean;
   isLast?: boolean;
@@ -756,9 +767,16 @@ export const ToolMessagePart = memo(
   }: ToolMessagePartProps) => {
     const t = useTranslations("");
 
-    const { output, toolCallId, state, input, errorText } = part;
+    const toolCallId = part.toolCallId;
+    const state = part.state;
+    const input = part.input;
+    const output = "output" in part ? part.output : undefined;
+    const errorText = "errorText" in part ? part.errorText : undefined;
 
-    const toolName = useMemo(() => getToolName(part), [part.type]);
+    const toolName = useMemo(() => {
+      if (isDynamicToolPart(part)) return part.toolName;
+      return getToolName(part);
+    }, [part]);
 
     const isCompleted = useMemo(() => {
       return state.startsWith("output");
@@ -828,7 +846,7 @@ export const ToolMessagePart = memo(
     }, [messageId]);
 
     const onToolCallDirect = useCallback(
-      (result: any) => {
+      (result: unknown) => {
         addToolResult?.({
           tool: toolName,
           toolCallId,
@@ -869,67 +887,142 @@ export const ToolMessagePart = memo(
     );
 
     const CustomToolComponent = useMemo(() => {
+      const renderWithToolUIPart = (
+        render: (toolUIPart: ToolUIPart) => React.ReactNode,
+      ) => {
+        if (isDynamicToolPart(part)) return null;
+        return render(part);
+      };
+
       if (
         toolName === DefaultToolName.WebSearch ||
         toolName === DefaultToolName.WebContent
       ) {
-        return <WebSearchToolInvocation part={part} />;
+        return renderWithToolUIPart((toolUIPart) => (
+          <WebSearchToolInvocation part={toolUIPart} />
+        ));
       }
 
       if (toolName === ImageToolName) {
-        return <ImageGeneratorToolInvocation part={part} />;
+        return renderWithToolUIPart((toolUIPart) => (
+          <ImageGeneratorToolInvocation part={toolUIPart} />
+        ));
       }
 
       if (toolName === DefaultToolName.JavascriptExecution) {
-        return (
+        return renderWithToolUIPart((toolUIPart) => (
           <CodeExecutor
-            part={part}
-            key={part.toolCallId}
+            part={toolUIPart}
+            key={toolCallId}
             onResult={onToolCallDirect}
             type="javascript"
           />
-        );
+        ));
       }
 
       if (toolName === DefaultToolName.PythonExecution) {
-        return (
+        return renderWithToolUIPart((toolUIPart) => (
           <CodeExecutor
-            part={part}
-            key={part.toolCallId}
+            part={toolUIPart}
+            key={toolCallId}
             onResult={onToolCallDirect}
             type="python"
           />
-        );
+        ));
       }
 
       if (state === "output-available") {
         switch (toolName) {
-          case DefaultToolName.CreatePieChart:
+          case DefaultToolName.CreatePieChart: {
+            if (typeof input !== "object" || input === null) return null;
+            const pieProps = input as {
+              title: string;
+              data: Array<{ label: string; value: number }>;
+              description: string | null;
+              unit: string | null;
+            };
             return (
-              <PieChart key={`${toolCallId}-${toolName}`} {...(input as any)} />
+              <PieChart
+                key={`${toolCallId}-${toolName}`}
+                title={pieProps.title}
+                data={pieProps.data}
+                description={pieProps.description ?? undefined}
+                unit={pieProps.unit ?? undefined}
+              />
             );
-          case DefaultToolName.CreateBarChart:
+          }
+          case DefaultToolName.CreateBarChart: {
+            if (typeof input !== "object" || input === null) return null;
+            const barProps = input as {
+              title: string;
+              data: Array<{
+                xAxisLabel: string;
+                series: Array<{ seriesName: string; value: number }>;
+              }>;
+              description: string | null;
+              yAxisLabel: string | null;
+            };
             return (
-              <BarChart key={`${toolCallId}-${toolName}`} {...(input as any)} />
+              <BarChart
+                key={`${toolCallId}-${toolName}`}
+                title={barProps.title}
+                data={barProps.data}
+                description={barProps.description ?? undefined}
+                yAxisLabel={barProps.yAxisLabel ?? undefined}
+              />
             );
-          case DefaultToolName.CreateLineChart:
+          }
+          case DefaultToolName.CreateLineChart: {
+            if (typeof input !== "object" || input === null) return null;
+            const lineProps = input as {
+              title: string;
+              data: Array<{
+                xAxisLabel: string;
+                series: Array<{ seriesName: string; value: number }>;
+              }>;
+              description: string | null;
+              yAxisLabel: string | null;
+            };
             return (
               <LineChart
                 key={`${toolCallId}-${toolName}`}
-                {...(input as any)}
+                title={lineProps.title}
+                data={lineProps.data}
+                description={lineProps.description ?? undefined}
+                yAxisLabel={lineProps.yAxisLabel ?? undefined}
               />
             );
-          case DefaultToolName.CreateTable:
+          }
+          case DefaultToolName.CreateTable: {
+            if (typeof input !== "object" || input === null) return null;
+            const tableProps = input as {
+              title: string;
+              description: string | null;
+              columns: Array<{
+                key: string;
+                label: string;
+                type: "string" | "number" | "date" | "boolean" | null;
+              }>;
+              data: Array<Record<string, unknown>>;
+            };
             return (
               <InteractiveTable
                 key={`${toolCallId}-${toolName}`}
-                {...(input as any)}
+                title={tableProps.title}
+                description={tableProps.description ?? undefined}
+                columns={tableProps.columns.map((c) => ({
+                  key: c.key,
+                  label: c.label,
+                  type: c.type ?? undefined,
+                }))}
+                data={tableProps.data}
               />
             );
+          }
         }
       }
       return null;
-    }, [toolName, state, onToolCallDirect, result, input]);
+    }, [part, toolName, state, toolCallId, onToolCallDirect, input]);
 
     const { serverName: mcpServerName, toolName: mcpToolName } = useMemo(() => {
       return extractMCPToolId(toolName);
@@ -1330,13 +1423,17 @@ export function SourceUrlMessagePart({
   part,
   isUserMessage,
 }: {
-  part: { type: "source-url"; url: string; title?: string; mediaType?: string };
+  part:
+    | Extract<MessagePart, { type: "source-url" }>
+    | { type: "source-url"; url: string; title?: string; mediaType?: string };
   isUserMessage: boolean;
 }) {
   const name = part.title || part.url?.split("/").pop() || "attachment";
   const ext = name.split(".").pop()?.toUpperCase() || "FILE";
   const mediaType =
-    part.mediaType && part.mediaType !== "application/octet-stream"
+    "mediaType" in part &&
+    typeof part.mediaType === "string" &&
+    part.mediaType !== "application/octet-stream"
       ? part.mediaType
       : undefined;
   return (

@@ -97,6 +97,7 @@ You can assist with:
 - Analysis and problem-solving across various domains
 - Using available tools and resources to complete tasks
 - Adapting communication to user preferences and context
+- When the user requests an execution plan or task breakdown, prefer using the "plan" tool to produce structured output
 </general_capabilities>`;
 
   // Communication preferences

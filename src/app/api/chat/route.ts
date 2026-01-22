@@ -25,6 +25,8 @@ import {
   ChatMention,
   ChatMetadata,
 } from "app-types/chat";
+import { DefaultToolName } from "lib/ai/tools";
+import { PlanToolOutputSchema } from "app-types/plan";
 
 import { errorIf, safe } from "ts-safe";
 
@@ -96,10 +98,14 @@ export async function POST(request: Request) {
     }
 
     const messages: UIMessage[] = (thread?.messages ?? []).map((m) => {
+      const parts = m.parts.filter(
+        (part): part is UIMessage["parts"][number] =>
+          part.type !== "data-plan" && part.type !== "data-plan-progress",
+      );
       return {
         id: m.id,
         role: m.role,
-        parts: m.parts,
+        parts,
         metadata: m.metadata,
       };
     });
@@ -204,6 +210,18 @@ export async function POST(request: Request) {
 
     const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
+        const planProgressStore = new Map<
+          string,
+          {
+            planId: string;
+            steps: Array<{
+              status: "pending" | "in_progress" | "completed" | "failed";
+            }>;
+            currentStepIndex?: number;
+          }
+        >();
+        let activePlanId: string | undefined;
+
         const mcpClients = await mcpClientsManager.getClients();
         const mcpTools = await mcpClientsManager.tools();
         logger.info(
@@ -235,6 +253,11 @@ export async function POST(request: Request) {
             loadAppDefaultTools({
               mentions,
               allowedAppDefaultToolkit,
+              dataStream,
+              planProgressStore,
+              setActivePlanId: (planId) => {
+                activePlanId = planId;
+              },
             }),
           )
           .orElse({});
@@ -334,16 +357,106 @@ export async function POST(request: Request) {
           abortSignal: request.signal,
         });
         result.consumeStream();
-        dataStream.merge(
-          result.toUIMessageStream({
-            messageMetadata: ({ part }) => {
-              if (part.type == "finish") {
-                metadata.usage = part.totalUsage;
-                return metadata;
+        const toolNameByToolCallId = new Map<string, string>();
+
+        const uiStream = result.toUIMessageStream({
+          messageMetadata: ({ part }) => {
+            if (part.type == "finish") {
+              metadata.usage = part.totalUsage;
+              return metadata;
+            }
+          },
+        });
+
+        const tapped = uiStream.pipeThrough(
+          new TransformStream({
+            transform(chunk, controller) {
+              if (chunk.type === "tool-input-available") {
+                toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
+
+                if (chunk.toolName === DefaultToolName.Plan) {
+                  const parsed = PlanToolOutputSchema.safeParse(chunk.input);
+                  if (parsed.success) {
+                    const planId = chunk.toolCallId;
+                    activePlanId = planId;
+                    const steps = parsed.data.steps.map(() => ({
+                      status: "pending" as const,
+                    }));
+                    const snapshot = {
+                      planId,
+                      steps,
+                      currentStepIndex: steps.length ? 0 : undefined,
+                    };
+                      planProgressStore.set(planId, snapshot);
+                      dataStream.write({
+                        type: "data-plan",
+                        id: planId,
+                        data: parsed.data,
+                      });
+                    dataStream.write({
+                      type: "data-plan-progress",
+                      id: planId,
+                      data: snapshot,
+                    });
+                  }
+                } else if (
+                    chunk.toolName !== DefaultToolName.UpdatePlanProgress &&
+                  activePlanId
+                ) {
+                    const current = planProgressStore.get(activePlanId);
+                  if (current?.currentStepIndex !== undefined) {
+                    const idx = current.currentStepIndex;
+                    if (current.steps[idx]?.status === "pending") {
+                      current.steps[idx] = { status: "in_progress" };
+                      dataStream.write({
+                        type: "data-plan-progress",
+                        id: activePlanId,
+                        data: current,
+                      });
+                    }
+                  }
+                }
+              } else if (
+                chunk.type === "tool-output-available" ||
+                chunk.type === "tool-output-error"
+              ) {
+                const toolName = toolNameByToolCallId.get(chunk.toolCallId);
+                const isProgressTool =
+                    toolName === DefaultToolName.UpdatePlanProgress;
+                const isPlanTool = toolName === DefaultToolName.Plan;
+                if (!isPlanTool && !isProgressTool && activePlanId) {
+                    const current = planProgressStore.get(activePlanId);
+                  if (current?.currentStepIndex !== undefined) {
+                    const idx = current.currentStepIndex;
+                    const status =
+                      chunk.type === "tool-output-error"
+                        ? ("failed" as const)
+                        : ("completed" as const);
+                    current.steps[idx] = { status };
+                    const nextIndex =
+                      idx + 1 < current.steps.length ? idx + 1 : undefined;
+                    current.currentStepIndex = nextIndex;
+                    if (nextIndex !== undefined) {
+                      const nextStatus = current.steps[nextIndex]?.status;
+                      if (nextStatus === "pending") {
+                        current.steps[nextIndex] = { status: "in_progress" };
+                      }
+                    }
+                    dataStream.write({
+                      type: "data-plan-progress",
+                      id: activePlanId,
+                      data: current,
+                    });
+                  }
+                }
               }
+
+              controller.enqueue(chunk);
             },
           }),
         );
+
+        dataStream.merge(tapped);
       },
 
       generateId: generateUUID,

@@ -1,7 +1,7 @@
 import { selectThreadWithMessagesAction } from "@/app/api/chat/actions";
 import ChatBot from "@/components/chat-bot";
 
-import { ChatMessage, ChatThread } from "app-types/chat";
+import { ChatMessage, ChatThread, ChatUIMessage } from "app-types/chat";
 import { redirect, RedirectType } from "next/navigation";
 
 const fetchThread = async (
@@ -19,5 +19,12 @@ export default async function Page({
 
   if (!thread) redirect("/", RedirectType.replace);
 
-  return <ChatBot threadId={threadId} initialMessages={thread.messages} />;
+  const initialMessages: ChatUIMessage[] = thread.messages.map((m) => ({
+    id: m.id,
+    role: m.role,
+    parts: m.parts,
+    metadata: m.metadata,
+  }));
+
+  return <ChatBot threadId={threadId} initialMessages={initialMessages} />;
 }

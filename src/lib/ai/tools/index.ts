@@ -10,6 +10,8 @@ export enum DefaultToolName {
   CreateBarChart = "createBarChart",
   CreateLineChart = "createLineChart",
   CreateTable = "createTable",
+  Plan = "plan",
+  UpdatePlanProgress = "updatePlanProgress",
   WebSearch = "webSearch",
   WebContent = "webContent",
   Http = "http",

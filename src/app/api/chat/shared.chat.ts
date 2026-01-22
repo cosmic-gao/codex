@@ -6,7 +6,6 @@ import {
   jsonSchema,
   tool as createTool,
   isToolUIPart,
-  UIMessagePart,
   ToolUIPart,
   getToolName,
   UIMessageStreamWriter,
@@ -16,7 +15,7 @@ import {
   ChatMetadata,
   ManualToolConfirmTag,
 } from "app-types/chat";
-import { errorToString, exclude, objectFlow } from "lib/utils";
+import { errorToString, objectFlow } from "lib/utils";
 import logger from "logger";
 import {
   AllowedMCPServer,
@@ -40,7 +39,19 @@ import { createWorkflowExecutor } from "lib/ai/workflow/executor/workflow-execut
 import { NodeKind } from "lib/ai/workflow/workflow.interface";
 import { mcpClientsManager } from "lib/ai/mcp/mcp-manager";
 import { APP_DEFAULT_TOOL_KIT } from "lib/ai/tools/tool-kit";
-import { AppDefaultToolkit } from "lib/ai/tools";
+import { AppDefaultToolkit, DefaultToolName } from "lib/ai/tools";
+import { UpdatePlanProgressInputSchema } from "lib/ai/tools/planning/update-plan-progress";
+import { PlanToolOutputSchema } from "app-types/plan";
+
+function stripProviderMetadata<P extends UIMessage["parts"][number]>(part: P): P {
+  const withMetadata = part as unknown as P & {
+    providerMetadata?: unknown;
+    callProviderMetadata?: unknown;
+  };
+  const { providerMetadata: _pm, callProviderMetadata: _cpm, ...rest } =
+    withMetadata;
+  return rest as P;
+}
 
 export function filterMCPToolsByMentions(
   tools: Record<string, VercelAIMcpTool>,
@@ -157,13 +168,16 @@ export function manualToolExecuteByLastMessage(
     .unwrap();
 }
 
-export function handleError(error: any) {
+export function handleError(error: unknown) {
   if (LoadAPIKeyError.isInstance(error)) {
     return error.message;
   }
   logger.error(error);
-  logger.error(`Route Error: ${error.name}`);
-  return errorToString(error.message);
+  if (error instanceof Error) {
+    logger.error(`Route Error: ${error.name}`);
+    return errorToString(error.message);
+  }
+  return errorToString(error);
 }
 
 export function extractInProgressToolPart(message: UIMessage): ToolUIPart[] {
@@ -318,7 +332,7 @@ export const workflowToVercelAITool = ({
           });
           return executor.run(
             {
-              query: query ?? ({} as any),
+              query: (query ?? {}) as Record<string, unknown>,
             },
             {
               disableHistory: true,
@@ -428,31 +442,92 @@ export const loadWorkFlowTools = (opt: {
 export const loadAppDefaultTools = (opt?: {
   mentions?: ChatMention[];
   allowedAppDefaultToolkit?: string[];
+  dataStream?: UIMessageStreamWriter;
+  planProgressStore?: Map<
+    string,
+    {
+      planId: string;
+      steps: Array<{
+        status: "pending" | "in_progress" | "completed" | "failed";
+      }>;
+      currentStepIndex?: number;
+    }
+  >;
+  setActivePlanId?: (planId: string) => void;
 }) =>
   safe(APP_DEFAULT_TOOL_KIT)
     .map((tools) => {
+      const bindUpdatePlanProgressTool = (
+        selected: Record<string, Tool>,
+      ): Record<string, Tool> => {
+        if (!opt?.dataStream || !opt.planProgressStore) return selected;
+        if (!(DefaultToolName.UpdatePlanProgress in selected)) return selected;
+
+        const store = opt.planProgressStore;
+        const writer = opt.dataStream;
+        return {
+          ...selected,
+          [DefaultToolName.UpdatePlanProgress]: createTool({
+            description: selected[DefaultToolName.UpdatePlanProgress]!.description,
+            inputSchema: UpdatePlanProgressInputSchema,
+            execute: async (input) => {
+              const planId = input.planId;
+              opt.setActivePlanId?.(planId);
+
+              const current = store.get(planId) ?? {
+                planId,
+                steps: [],
+                currentStepIndex: undefined,
+              };
+
+              if (input.stepIndex !== undefined && input.status !== undefined) {
+                while (current.steps.length <= input.stepIndex) {
+                  current.steps.push({ status: "pending" });
+                }
+                current.steps[input.stepIndex] = { status: input.status };
+              }
+
+              if (input.currentStepIndex !== undefined) {
+                current.currentStepIndex = input.currentStepIndex;
+              }
+
+              store.set(planId, current);
+              writer.write({
+                type: "data-plan-progress",
+                id: planId,
+                data: current,
+              });
+
+              return "Success";
+            },
+          }),
+        };
+      };
+
       if (opt?.mentions?.length) {
         const defaultToolMentions = opt.mentions.filter(
           (m) => m.type == "defaultTool",
         );
-        return Array.from(Object.values(tools)).reduce((acc, t) => {
+        const selected = Array.from(Object.values(tools)).reduce((acc, t) => {
           const allowed = objectFlow(t).filter((_, k) => {
             return defaultToolMentions.some((m) => m.name == k);
           });
           return { ...acc, ...allowed };
         }, {});
+        return bindUpdatePlanProgressTool(selected);
       }
       const allowedAppDefaultToolkit =
         opt?.allowedAppDefaultToolkit ?? Object.values(AppDefaultToolkit);
 
-      return (
+      const selected =
         allowedAppDefaultToolkit.reduce(
           (acc, key) => {
             return { ...acc, ...tools[key] };
           },
           {} as Record<string, Tool>,
-        ) || {}
-      );
+        ) || {};
+
+      return bindUpdatePlanProgressTool(selected);
     })
     .ifFail((e) => {
       console.error(e);
@@ -460,30 +535,39 @@ export const loadAppDefaultTools = (opt?: {
     })
     .orElse({} as Record<string, Tool>);
 
-export const convertToSavePart = <T extends UIMessagePart<any, any>>(
-  part: T,
-) => {
-  return safe(
-    exclude(part as any, ["providerMetadata", "callProviderMetadata"]) as T,
-  )
-    .map((v) => {
-      if (isToolUIPart(v) && v.state.startsWith("output")) {
-        if (VercelAIWorkflowToolStreamingResultTag.isMaybe(v.output)) {
-          return {
-            ...v,
-            output: {
-              ...v.output,
-              history: v.output.history.map((h: any) => {
-                return {
-                  ...h,
-                  result: undefined,
-                };
-              }),
-            },
-          };
-        }
+export const convertToSavePart = (
+  part: UIMessage["parts"][number],
+): UIMessage["parts"][number] => {
+  const v = stripProviderMetadata(part);
+
+  if (isToolUIPart(v) && v.state === "output-available") {
+    const toolName = getToolName(v);
+    if (toolName === DefaultToolName.Plan) {
+      const parsed = PlanToolOutputSchema.safeParse(v.input);
+      if (parsed.success) {
+        return {
+          type: "data-plan" as const,
+          id: v.toolCallId,
+          data: parsed.data,
+        };
       }
-      return v;
-    })
-    .unwrap();
+    }
+
+    if (VercelAIWorkflowToolStreamingResultTag.isMaybe(v.output)) {
+      return {
+        ...v,
+        output: {
+          ...v.output,
+          history: v.output.history.map((h) => {
+            return {
+              ...h,
+              result: undefined,
+            };
+          }),
+        },
+      };
+    }
+  }
+
+  return v;
 };

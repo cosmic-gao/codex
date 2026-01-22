@@ -1,6 +1,6 @@
 "use client";
 
-import { isToolUIPart, type UIMessage } from "ai";
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import { memo, useMemo, useState } from "react";
 import equal from "lib/equal";
 
@@ -14,10 +14,21 @@ import {
   FileMessagePart,
   SourceUrlMessagePart,
 } from "./message-parts";
+import { getLatestPlanProgress, PlanMessagePart } from "./plan-message-part";
 import { ChevronDown, ChevronUp, TriangleAlertIcon } from "lucide-react";
 import { Button } from "ui/button";
 import { useTranslations } from "next-intl";
 import { ChatMetadata } from "app-types/chat";
+import { DefaultToolName } from "lib/ai/tools";
+import { PlanDataPartSchema, PlanToolOutputSchema } from "app-types/plan";
+
+type MessagePart = UIMessage["parts"][number];
+
+function isIngestionPreviewTextPart(
+  part: MessagePart,
+): part is Extract<MessagePart, { type: "text" }> & { ingestionPreview: unknown } {
+  return part.type === "text" && "ingestionPreview" in part;
+}
 
 interface Props {
   message: UIMessage;
@@ -52,9 +63,13 @@ const PurePreviewMessage = ({
   const partsForDisplay = useMemo(
     () =>
       message.parts.filter(
-        (part) => !(part.type === "text" && (part as any).ingestionPreview),
+        (part) => !(isIngestionPreviewTextPart(part) && Boolean(part.ingestionPreview)),
       ),
     [message.parts],
+  );
+  const hasDataPlan = useMemo(
+    () => partsForDisplay.some((p) => p.type === "data-plan"),
+    [partsForDisplay],
   );
 
   if (message.role == "system") {
@@ -74,6 +89,31 @@ const PurePreviewMessage = ({
           {partsForDisplay.map((part, index) => {
             const key = `message-${messageIndex}-part-${part.type}-${index}`;
             const isLastPart = index === partsForDisplay.length - 1;
+
+            const parsedPlanPart = PlanDataPartSchema.safeParse(part);
+            if (parsedPlanPart.success) {
+              const planId =
+                parsedPlanPart.data.id ??
+                (typeof parsedPlanPart.data.data.title === "string"
+                  ? `${message.id}:${parsedPlanPart.data.data.title}`
+                  : message.id);
+              
+              const progress = getLatestPlanProgress(partsForDisplay, planId);
+
+              return (
+                <PlanMessagePart
+                  key={key}
+                  plan={parsedPlanPart.data.data}
+                  planId={planId}
+                  progress={progress}
+                  isStreaming={false}
+                />
+              );
+            }
+
+            if (part.type === "data-plan-progress") {
+              return null;
+            }
 
             if (part.type === "reasoning") {
               return (
@@ -122,6 +162,28 @@ const PurePreviewMessage = ({
             }
 
             if (isToolUIPart(part)) {
+              const toolName = getToolName(part);
+
+              if (toolName === DefaultToolName.UpdatePlanProgress) {
+                return null;
+              }
+
+              if (toolName === DefaultToolName.Plan) {
+                if (hasDataPlan) return null;
+                const parsed = PlanToolOutputSchema.safeParse(part.input);
+                if (parsed.success) {
+                  const progress = getLatestPlanProgress(partsForDisplay, part.toolCallId);
+                  return (
+                    <PlanMessagePart
+                      key={key}
+                      plan={parsed.data}
+                      planId={part.toolCallId}
+                      progress={progress}
+                      isStreaming={!part.state.startsWith("output")}
+                    />
+                  );
+                }
+              }
               const isLast = isLastMessage && isLastPart;
               const isManualToolInvocation =
                 (message.metadata as ChatMetadata)?.toolChoice == "manual" &&
@@ -156,11 +218,11 @@ const PurePreviewMessage = ({
                   isUserMessage={isUserMessage}
                 />
               );
-            } else if ((part as any).type === "source-url") {
+            } else if (part.type === "source-url") {
               return (
                 <SourceUrlMessagePart
                   key={key}
-                  part={part as any}
+                  part={part}
                   isUserMessage={isUserMessage}
                 />
               );

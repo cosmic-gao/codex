@@ -2,18 +2,17 @@ import {
   FilePart,
   ImagePart,
   ModelMessage,
-  ToolResultPart,
+  ToolContent,
   tool as createTool,
   generateText,
 } from "ai";
 import { generateImageWithNanoBanana } from "lib/ai/image/generate-image";
 import { serverFileStorage } from "lib/file-storage";
 import { safe, watchError } from "ts-safe";
-import z from "zod";
+import { z } from "zod";
 import { ImageToolName } from "..";
 import logger from "logger";
 import { openai } from "@ai-sdk/openai";
-import { toAny } from "lib/utils";
 
 export type ImageToolResult = {
   images: {
@@ -26,7 +25,6 @@ export type ImageToolResult = {
 };
 
 export const nanoBananaTool = createTool({
-  name: ImageToolName,
   description: `Generate, edit, or composite images based on the conversation context. This tool automatically analyzes recent messages to create images without requiring explicit input parameters. It includes all user-uploaded images from the recent conversation and only the most recent AI-generated image to avoid confusion. Use the 'mode' parameter to specify the operation type: 'create' for new images, 'edit' for modifying existing images, or 'composite' for combining multiple images. Use this when the user requests image creation, modification, or visual content generation.`,
   inputSchema: z.object({
     mode: z
@@ -103,8 +101,8 @@ export const nanoBananaTool = createTool({
         model: "gemini-2.5-flash-image",
         guide:
           resultImages.length > 0
-            ? "The image has been successfully generated and is now displayed above. If you need any edits, modifications, or adjustments to the image, please let me know."
-            : "I apologize, but the image generation was not successful. To help me create a better image for you, could you please provide more specific details about what you'd like to see? For example:\n\n• What style are you looking for? (realistic, cartoon, abstract, etc.)\n• What colors or mood should the image have?\n• Are there any specific objects, people, or scenes you want included?\n• What size or format would work best for your needs?\n\nPlease share these details and I'll try generating the image again with your specifications.",
+            ? "The image has been successfully generated and is now displayed above. If you need further edits, modifications, or adjustments to the image, please let me know."
+            : "I apologize, but the image generation was not successful. To help me create a better image for you, could you please provide more specific details about what you'd like to see? For example:\n\n• What style are you looking for? (realistic, cartoon, abstract, etc.)\n• What colors or mood should the image have?\n• Are there specific objects, people, or scenes you want included?\n• What size or format would work best for your needs?\n\nPlease share these details and I'll try generating the image again with your specifications.",
       };
     } catch (e) {
       logger.error(e);
@@ -114,7 +112,6 @@ export const nanoBananaTool = createTool({
 });
 
 export const openaiImageTool = createTool({
-  name: ImageToolName,
   description: `Generate, edit, or composite images based on the conversation context. This tool automatically analyzes recent messages to create images without requiring explicit input parameters. It includes all user-uploaded images from the recent conversation and only the most recent AI-generated image to avoid confusion. Use the 'mode' parameter to specify the operation type: 'create' for new images, 'edit' for modifying existing images, or 'composite' for combining multiple images. Use this when the user requests image creation, modification, or visual content generation.`,
   inputSchema: z.object({
     mode: z
@@ -181,7 +178,7 @@ export const openaiImageTool = createTool({
           mode,
           model: "gpt-image-1-mini",
           guide:
-            "The image has been successfully generated and is now displayed above. If you need any edits, modifications, or adjustments to the image, please let me know.",
+            "The image has been successfully generated and is now displayed above. If you need further edits, modifications, or adjustments to the image, please let me know.",
         };
       }
     }
@@ -194,24 +191,42 @@ export const openaiImageTool = createTool({
   },
 });
 
-function convertToImageToolPartToImagePart(part: ToolResultPart): ImagePart[] {
+const ImageToolResultSchema = z.object({
+  images: z.array(
+    z.object({
+      url: z.string(),
+      mimeType: z.string().optional(),
+    }),
+  ),
+  mode: z.enum(["create", "edit", "composite"]).optional(),
+  guide: z.string().optional(),
+  model: z.string(),
+});
+
+function convertToImageToolPartToImagePart(
+  part: ToolContent[number],
+): ImagePart[] {
+  if (part.type !== "tool-result") return [];
   if (part.toolName !== ImageToolName) return [];
-  if (!toAny(part).output?.value?.images?.length) return [];
-  const result = part.output.value as ImageToolResult;
-  return result.images.map((image) => ({
+  if (part.output.type !== "json") return [];
+  const parsed = ImageToolResultSchema.safeParse(part.output.value);
+  if (!parsed.success || parsed.data.images.length === 0) return [];
+  return parsed.data.images.map((image) => ({
     type: "image",
     image: image.url,
     mediaType: image.mimeType,
   }));
 }
 
-function convertToImageToolPartToFilePart(part: ToolResultPart): FilePart[] {
+function convertToImageToolPartToFilePart(part: ToolContent[number]): FilePart[] {
+  if (part.type !== "tool-result") return [];
   if (part.toolName !== ImageToolName) return [];
-  if (!toAny(part).output?.value?.images?.length) return [];
-  const result = part.output.value as ImageToolResult;
-  return result.images.map((image) => ({
+  if (part.output.type !== "json") return [];
+  const parsed = ImageToolResultSchema.safeParse(part.output.value);
+  if (!parsed.success || parsed.data.images.length === 0) return [];
+  return parsed.data.images.map((image) => ({
     type: "file",
-    mediaType: image.mimeType!,
+    mediaType: image.mimeType ?? "image/webp",
     data: image.url,
   }));
 }

@@ -145,7 +145,7 @@ export function BarChart(props: BarChartProps) {
       <CardContent>
         <div>
           <ChartContainer config={chartConfig}>
-            <ResponsiveContainer width="100%" height="400px">
+            <ResponsiveContainer width="100%" height={400}>
               <RechartsBarChart data={chartData}>
                 <CartesianGrid vertical={false} />
                 <XAxis

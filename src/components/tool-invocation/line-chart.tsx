@@ -147,7 +147,7 @@ export function LineChart(props: LineChartProps) {
       <CardContent>
         <div>
           <ChartContainer config={chartConfig}>
-            <ResponsiveContainer width="100%" height="400px">
+            <ResponsiveContainer width="100%" height={400}>
               <RechartsLineChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis

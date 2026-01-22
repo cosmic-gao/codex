@@ -163,36 +163,35 @@ export default function ChatBot({ threadId, initialMessages }: Props) {
           window.history.replaceState({}, "", `/chat/${threadId}`);
         }
         const lastMessage = messages.at(-1)!;
-        // Filter out UI-only parts (e.g., source-url) so the model doesn't receive unknown parts
-        const attachments: ChatAttachment[] = lastMessage.parts.reduce(
-          (acc: ChatAttachment[], part: any) => {
-            if (part?.type === "file") {
-              acc.push({
-                type: "file",
-                url: part.url,
-                mediaType: part.mediaType,
-                filename: part.filename,
-              });
-            } else if (part?.type === "source-url") {
-              acc.push({
-                type: "source-url",
-                url: part.url,
-                mediaType: part.mediaType,
-                filename: part.title,
-              });
-            }
-            return acc;
-          },
-          [],
-        );
+        const attachments: ChatAttachment[] = [];
+        for (const part of lastMessage.parts) {
+          if (part.type === "file") {
+            attachments.push({
+              type: "file",
+              url: part.url,
+              mediaType: part.mediaType,
+              filename: part.filename,
+            });
+          } else if (part.type === "source-url") {
+            attachments.push({
+              type: "source-url",
+              url: part.url,
+              mediaType:
+                "mediaType" in part && typeof part.mediaType === "string"
+                  ? part.mediaType
+                  : undefined,
+              filename: part.title,
+            });
+          }
+        }
 
         const sanitizedLastMessage = {
           ...lastMessage,
-          parts: lastMessage.parts.filter((p: any) => p?.type !== "source-url"),
+          parts: lastMessage.parts.filter(
+            (p) => p.type !== "source-url" && p.type !== "data-plan",
+          ),
         } as typeof lastMessage;
-        const hasFilePart = lastMessage.parts?.some(
-          (p) => (p as any)?.type === "file",
-        );
+        const hasFilePart = lastMessage.parts.some((p) => p.type === "file");
 
         const requestBody: ChatApiSchemaRequestBody = {
           ...body,
