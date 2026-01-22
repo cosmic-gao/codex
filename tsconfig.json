@@ -19,6 +19,7 @@
     "strictPropertyInitialization": false,
     "noUnusedParameters": false,
     "noImplicitAny": false,
+    "types": ["vitest/globals"],
     "plugins": [
       {
         "name": "next"
