@@ -12,7 +12,7 @@ export enum DefaultToolName {
   CreateTable = "createTable",
   Outline = "outline",
   Plan = "plan",
-  UpdatePlanProgress = "updatePlanProgress",
+  Progress = "progress",
   WebSearch = "webSearch",
   WebContent = "webContent",
   Http = "http",

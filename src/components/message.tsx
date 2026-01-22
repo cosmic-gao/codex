@@ -26,6 +26,8 @@ import {
   PlanStepOutputDataPartSchema,
   PlanToolOutputSchema,
   PlanActionSchema,
+  type PlanToolOutput,
+  type DeepPartial,
 } from "app-types/plan";
 import { z } from "zod";
 
@@ -231,24 +233,29 @@ const PurePreviewMessage = ({
             if (isToolUIPart(part)) {
               const toolName = getToolName(part);
 
-              if (toolName === DefaultToolName.UpdatePlanProgress) {
+              if (toolName === DefaultToolName.Progress) {
                 return null;
               }
 
               if (toolName === DefaultToolName.Plan) {
                 if (hasDataPlan || hasDataOutline) return null;
                 
+                let planData: DeepPartial<PlanToolOutput> = {};
+                let isStreaming = true;
+
                 // Try strict parsing first
-                let parsed = PlanToolOutputSchema.safeParse(part.input);
+                const parsed = PlanToolOutputSchema.safeParse(part.input);
                 
-                // If strict parsing fails, try lenient parsing for streaming/partial data
-                if (!parsed.success) {
-                   const lenientParsed = LenientPlanToolOutputSchema.safeParse(part.input);
-                   if (lenientParsed.success) {
-                      // Treat partial data as valid enough for display
-                      parsed = lenientParsed as any;
-                   }
-                }
+                if (parsed.success) {
+                  planData = parsed.data;
+                  isStreaming = !part.state.startsWith("output");
+                } else {
+                    // If strict parsing fails, try lenient parsing for streaming/partial data
+                    const lenientParsed = LenientPlanToolOutputSchema.safeParse(part.input);
+                    if (lenientParsed.success) {
+                       planData = lenientParsed.data as DeepPartial<PlanToolOutput>;
+                    }
+                 }
 
                 const progress = getLatestPlanProgress(
                   partsForDisplay,
@@ -259,28 +266,14 @@ const PurePreviewMessage = ({
                   part.toolCallId,
                 );
 
-                if (parsed.success) {
-                  return (
-                    <PlanMessagePart
-                      key={key}
-                      plan={parsed.data}
-                      planId={part.toolCallId}
-                      progress={progress}
-                       stepOutputs={stepOutputs}
-                      isStreaming={!part.state.startsWith("output")}
-                    />
-                  );
-                }
-                
-                // Fallback for when parsing fails completely but we still want to show something
                 return (
                   <PlanMessagePart
                     key={key}
-                    plan={{}}
+                    plan={planData}
                     planId={part.toolCallId}
                     progress={progress}
                     stepOutputs={stepOutputs}
-                    isStreaming={true}
+                    isStreaming={isStreaming}
                   />
                 );
               }

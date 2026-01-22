@@ -1,6 +1,6 @@
 "use client";
 
-import type { OutlineToolOutput, PlanToolOutput, PlanProgress } from "app-types/plan";
+import type { OutlineToolOutput, PlanToolOutput, PlanProgress, DeepPartial } from "app-types/plan";
 import { PlanProgressDataPartSchema } from "app-types/plan";
 import { cn } from "lib/utils";
 import { truncateString } from "lib/utils";
@@ -15,14 +15,6 @@ import {
   XCircle,
 } from "lucide-react";
 import { memo, useState, useEffect } from "react";
-
-type DeepPartial<T> = {
-  [P in keyof T]?: T[P] extends Array<infer U>
-    ? Array<DeepPartial<U>>
-    : T[P] extends object
-    ? DeepPartial<T[P]>
-    : T[P];
-};
 
 type Props = {
   plan: DeepPartial<PlanToolOutput> | DeepPartial<OutlineToolOutput>;
@@ -61,6 +53,52 @@ function toStepStatus(
   if (status === "failed") return "failed";
   return "pending";
 }
+
+const StatusIcon = ({ status }: { status: StepStatus }) => {
+  return (
+    <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background ring-4 ring-background">
+      <AnimatePresence mode="wait">
+        {status === "completed" ? (
+          <motion.div
+            key="completed"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+          >
+            <CheckCircle2 className="size-5 text-emerald-500" />
+          </motion.div>
+        ) : status === "in_progress" ? (
+          <motion.div
+            key="in_progress"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+          >
+            <Loader2 className="size-5 animate-spin text-blue-500" />
+          </motion.div>
+        ) : status === "failed" ? (
+          <motion.div
+            key="failed"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+          >
+            <XCircle className="size-5 text-red-500" />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="pending"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0, opacity: 0 }}
+          >
+            <CircleDashed className="size-5 text-muted-foreground/40" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
 
 const PlanStep = ({
   step,
@@ -104,47 +142,7 @@ const PlanStep = ({
       )}
 
       {/* Status Icon */}
-      <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background ring-4 ring-background">
-        <AnimatePresence mode="wait">
-          {status === "completed" ? (
-            <motion.div
-              key="completed"
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-            >
-              <CheckCircle2 className="size-5 text-emerald-500" />
-            </motion.div>
-          ) : status === "in_progress" ? (
-            <motion.div
-              key="in_progress"
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-            >
-              <Loader2 className="size-5 animate-spin text-blue-500" />
-            </motion.div>
-          ) : status === "failed" ? (
-            <motion.div
-              key="failed"
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-            >
-              <XCircle className="size-5 text-red-500" />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="pending"
-              initial={{ scale: 0, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-            >
-              <CircleDashed className="size-5 text-muted-foreground/40" />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+      <StatusIcon status={status} />
 
       {/* Content */}
       <div className="flex-1 pb-6">

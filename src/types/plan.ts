@@ -7,21 +7,6 @@ export const PlanActionSchema = z.object({
 
 export type PlanAction = z.infer<typeof PlanActionSchema>;
 
-export const OutlineStepSchema = z.object({
-  title: z.string(),
-  description: z.string().optional(),
-});
-
-export type OutlineStep = z.infer<typeof OutlineStepSchema>;
-
-export const OutlineToolOutputSchema = z.object({
-  title: z.string(),
-  description: z.string().optional(),
-  steps: z.array(OutlineStepSchema).default([]),
-});
-
-export type OutlineToolOutput = z.infer<typeof OutlineToolOutputSchema>;
-
 export const PlanStepSchema = z.object({
   title: z.string(),
   description: z.string().optional(),
@@ -37,14 +22,6 @@ export const PlanToolOutputSchema = z.object({
 });
 
 export type PlanToolOutput = z.infer<typeof PlanToolOutputSchema>;
-
-export const OutlineDataPartSchema = z.object({
-  type: z.literal("data-outline"),
-  id: z.string().optional(),
-  data: OutlineToolOutputSchema,
-});
-
-export type OutlineDataPart = z.infer<typeof OutlineDataPartSchema>;
 
 export const PlanDataPartSchema = z.object({
   type: z.literal("data-plan"),
@@ -86,10 +63,33 @@ export const PlanProgressDataPartSchema = z.object({
 
 export type PlanProgressDataPart = z.infer<typeof PlanProgressDataPartSchema>;
 
+export const OutlineStepSchema = z.object({
+  title: z.string(),
+  description: z.string().optional(),
+});
+
+export type OutlineStep = z.infer<typeof OutlineStepSchema>;
+
+export const OutlineToolOutputSchema = z.object({
+  title: z.string(),
+  description: z.string().optional(),
+  steps: z.array(OutlineStepSchema).default([]),
+});
+
+export type OutlineToolOutput = z.infer<typeof OutlineToolOutputSchema>;
+
+export const OutlineDataPartSchema = z.object({
+  type: z.literal("data-outline"),
+  id: z.string().optional(),
+  data: OutlineToolOutputSchema,
+});
+
+export type OutlineDataPart = z.infer<typeof OutlineDataPartSchema>;
+
 export const PlanStepOutputSchema = z.object({
   planId: z.string(),
-  stepIndex: z.number().int().nonnegative(),
-  toolName: z.string().optional(),
+  stepIndex: z.number(),
+  toolName: z.string(),
   output: z.unknown(),
 });
 
@@ -102,3 +102,11 @@ export const PlanStepOutputDataPartSchema = z.object({
 });
 
 export type PlanStepOutputDataPart = z.infer<typeof PlanStepOutputDataPartSchema>;
+
+export type DeepPartial<T> = {
+  [P in keyof T]?: T[P] extends Array<infer U>
+    ? Array<DeepPartial<U>>
+    : T[P] extends object
+    ? DeepPartial<T[P]>
+    : T[P];
+};

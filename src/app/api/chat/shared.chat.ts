@@ -41,7 +41,7 @@ import { mcpClientsManager } from "lib/ai/mcp/mcp-manager";
 import { APP_DEFAULT_TOOL_KIT } from "lib/ai/tools/tool-kit";
 import { AppDefaultToolkit, DefaultToolName } from "lib/ai/tools";
 import { UpdatePlanProgressInputSchema, UpdatePlanProgressInput } from "lib/ai/tools/planning/update-plan-progress";
-import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
+import { PlanToolOutputSchema, OutlineToolOutputSchema } from "app-types/plan";
 
 function stripProviderMetadata<P extends UIMessage["parts"][number]>(part: P): P {
   const withMetadata = part as unknown as P & {
@@ -462,14 +462,14 @@ export const loadAppDefaultTools = (opt?: {
         selected: Record<string, Tool>,
       ): Record<string, Tool> => {
         if (!opt?.dataStream || !opt.planProgressStore) return selected;
-        if (!(DefaultToolName.UpdatePlanProgress in selected)) return selected;
+        if (!(DefaultToolName.Progress in selected)) return selected;
 
         const store = opt.planProgressStore;
         const writer = opt.dataStream;
         return {
           ...selected,
-          [DefaultToolName.UpdatePlanProgress]: createTool({
-            description: selected[DefaultToolName.UpdatePlanProgress]!.description,
+          [DefaultToolName.Progress]: createTool({
+            description: selected[DefaultToolName.Progress]!.description,
             inputSchema: UpdatePlanProgressInputSchema,
             execute: async (input: UpdatePlanProgressInput) => {
               const planId = input.planId;
@@ -552,21 +552,22 @@ export const convertToSavePart = (
 
   if (isToolUIPart(v) && v.state === "output-available") {
     const toolName = getToolName(v);
-    if (toolName === DefaultToolName.Outline) {
-      const parsed = OutlineToolOutputSchema.safeParse(v.input);
-      if (parsed.success) {
-        return {
-          type: "data-outline" as const,
-          id: v.toolCallId,
-          data: parsed.data,
-        };
-      }
-    }
     if (toolName === DefaultToolName.Plan) {
       const parsed = PlanToolOutputSchema.safeParse(v.input);
       if (parsed.success) {
         return {
           type: "data-plan" as const,
+          id: v.toolCallId,
+          data: parsed.data,
+        };
+      }
+    }
+
+    if (toolName === DefaultToolName.Outline) {
+      const parsed = OutlineToolOutputSchema.safeParse(v.input);
+      if (parsed.success) {
+        return {
+          type: "data-outline" as const,
           id: v.toolCallId,
           data: parsed.data,
         };

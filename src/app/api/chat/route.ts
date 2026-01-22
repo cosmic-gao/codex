@@ -27,6 +27,8 @@ import {
 } from "app-types/chat";
 import { DefaultToolName } from "lib/ai/tools";
 import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
+import { detectIntent } from "lib/ai/intent/detector";
+import { UpdatePlanProgressInput } from "lib/ai/tools/planning/update-plan-progress";
 
 import { errorIf, safe } from "ts-safe";
 
@@ -219,6 +221,7 @@ export async function POST(request: Request) {
             planId: string;
             steps: Array<{
               status: "pending" | "in_progress" | "completed" | "failed";
+              actions?: { label: string; value?: string }[];
             }>;
             currentStepIndex?: number;
           }
@@ -306,7 +309,9 @@ export async function POST(request: Request) {
           .filter((p): p is Extract<(typeof message.parts)[number], { type: "text" }> => p.type === "text")
           .map((p) => p.text)
           .join("\n");
-        const forcePlanFirst = /计划|规划|plan/i.test(messageText);
+        
+        // Smart intent detection
+        const isPlanMode = await detectIntent(model, messageText);
 
         const IMAGE_TOOL: Record<string, Tool> = useImageTool
           ? {
@@ -409,7 +414,7 @@ export async function POST(request: Request) {
         let isExplicitPlanProgress = false;
         let stepIndexForStepOutput: number | undefined;
 
-        if (forcePlanFirst && vercelAITooles[DefaultToolName.Outline]) {
+        if (isPlanMode && vercelAITooles[DefaultToolName.Outline]) {
           const outlineAbort = new AbortController();
           if (request.signal.aborted) outlineAbort.abort();
           else
@@ -466,7 +471,7 @@ export async function POST(request: Request) {
               model,
               system:
                 systemPrompt +
-                `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n\n现在开始按该大纲逐步执行：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 update-plan-progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步结束后调用 update-plan-progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 每步需要调用其它工具产出内容（例如搜索/HTTP/代码执行/工作流等），并让工具输出作为该步骤的详情\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要调用 outline/plan 工具，也不要改写 steps 内容，只更新进度\n`,
+                `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n\n现在开始按该大纲逐步执行：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步结束后调用 progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 每步需要调用其它工具产出内容（例如搜索/HTTP/代码执行/工作流等），并让工具输出作为该步骤的详情\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要调用 outline/plan 工具，也不要改写 steps 内容，只更新进度\n`,
               messages: await convertToModelMessages(messages),
               experimental_transform: smoothStream({ chunking: "word" }),
               maxRetries: 2,
@@ -491,9 +496,9 @@ export async function POST(request: Request) {
                 transform(chunk, controller) {
                   if (chunk.type === "tool-input-available") {
                     toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
-                    if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                    if (chunk.toolName === DefaultToolName.Progress) {
                       isExplicitPlanProgress = true;
-                      const input = chunk.input as any;
+                      const input = chunk.input as UpdatePlanProgressInput;
                       if (typeof input?.currentStepIndex === "number") {
                         stepIndexForStepOutput = input.currentStepIndex;
                       } else if (typeof input?.stepIndex === "number") {
@@ -519,7 +524,7 @@ export async function POST(request: Request) {
                   ) {
                     const toolName = toolNameByToolCallId.get(chunk.toolCallId);
                     const isProgressTool =
-                      toolName === DefaultToolName.UpdatePlanProgress;
+                      toolName === DefaultToolName.Progress;
                     const isOutlineOrPlanTool =
                       toolName === DefaultToolName.Outline ||
                       toolName === DefaultToolName.Plan;
@@ -529,9 +534,11 @@ export async function POST(request: Request) {
                         stepIndexForStepOutput ?? current?.currentStepIndex;
                       if (idx !== undefined) {
                         const output =
-                          (chunk as any).output ??
-                          (chunk as any).error ??
-                          undefined;
+                          (chunk.type === "tool-output-available"
+                            ? chunk.output
+                            : chunk.type === "tool-output-error"
+                            ? chunk.errorText
+                            : undefined) ?? undefined;
                         dataStream.write({
                           type: "data-plan-step-output",
                           id: activePlanId,
@@ -579,7 +586,7 @@ export async function POST(request: Request) {
             dataStream.merge(tapped);
             return;
           }
-        } else if (forcePlanFirst && vercelAITooles[DefaultToolName.Plan]) {
+        } else if (isPlanMode && vercelAITooles[DefaultToolName.Plan]) {
           const planAbort = new AbortController();
           if (request.signal.aborted) planAbort.abort();
           else
@@ -634,7 +641,7 @@ export async function POST(request: Request) {
               model,
               system:
                 systemPrompt +
-                `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n\n现在开始执行该计划：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 update-plan-progress：{ planId:\"${planId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步完成后调用 update-plan-progress：{ planId:\"${planId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要再次调用 plan 工具，也不要改写 steps 内容，只更新进度\n`,
+                `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n\n现在开始执行该计划：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 progress：{ planId:\"${planId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步完成后调用 progress：{ planId:\"${planId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要再次调用 plan 工具，也不要改写 steps 内容，只更新进度\n`,
               messages: await convertToModelMessages(messages),
               experimental_transform: smoothStream({ chunking: "word" }),
               maxRetries: 2,
@@ -659,7 +666,7 @@ export async function POST(request: Request) {
                 transform(chunk, controller) {
                   if (chunk.type === "tool-input-available") {
                     toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
-                    if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                    if (chunk.toolName === DefaultToolName.Progress) {
                       isExplicitPlanProgress = true;
                       const input = chunk.input as any;
                       if (typeof input?.currentStepIndex === "number") {
@@ -687,16 +694,18 @@ export async function POST(request: Request) {
                   ) {
                     const toolName = toolNameByToolCallId.get(chunk.toolCallId);
                     const isProgressTool =
-                      toolName === DefaultToolName.UpdatePlanProgress;
+                      toolName === DefaultToolName.Progress;
                     if (!isProgressTool && activePlanId) {
                       const current = planProgressStore.get(activePlanId);
                       const idx =
                         stepIndexForStepOutput ?? current?.currentStepIndex;
                       if (idx !== undefined) {
                         const output =
-                          (chunk as any).output ??
-                          (chunk as any).error ??
-                          undefined;
+                          (chunk.type === "tool-output-available"
+                            ? chunk.output
+                            : chunk.type === "tool-output-error"
+                            ? chunk.errorText
+                            : undefined) ?? undefined;
                         dataStream.write({
                           type: "data-plan-step-output",
                           id: activePlanId,
@@ -754,9 +763,9 @@ export async function POST(request: Request) {
                   if (parsed.success) {
                     writePlanSnapshot(chunk.toolCallId, parsed.data);
                   }
-                } else if (chunk.toolName === DefaultToolName.UpdatePlanProgress) {
+                } else if (chunk.toolName === DefaultToolName.Progress) {
                   isExplicitPlanProgress = true;
-                  const input = chunk.input as any;
+                  const input = chunk.input as UpdatePlanProgressInput;
                   if (typeof input?.currentStepIndex === "number") {
                     stepIndexForStepOutput = input.currentStepIndex;
                   } else if (typeof input?.stepIndex === "number") {
@@ -782,14 +791,18 @@ export async function POST(request: Request) {
               ) {
                 const toolName = toolNameByToolCallId.get(chunk.toolCallId);
                 const isProgressTool =
-                  toolName === DefaultToolName.UpdatePlanProgress;
+                  toolName === DefaultToolName.Progress;
                 const isPlanTool = toolName === DefaultToolName.Plan;
                 if (!isProgressTool && !isPlanTool && activePlanId) {
                   const current = planProgressStore.get(activePlanId);
                   const idx = stepIndexForStepOutput ?? current?.currentStepIndex;
                   if (idx !== undefined) {
                     const output =
-                      (chunk as any).output ?? (chunk as any).error ?? undefined;
+                      (chunk.type === "tool-output-available"
+                        ? chunk.output
+                        : chunk.type === "tool-output-error"
+                        ? chunk.errorText
+                        : undefined) ?? undefined;
                     dataStream.write({
                       type: "data-plan-step-output",
                       id: activePlanId,

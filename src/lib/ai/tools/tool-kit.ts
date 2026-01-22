@@ -23,7 +23,7 @@ export const APP_DEFAULT_TOOL_KIT: Record<
     [DefaultToolName.CreateTable]: createTableTool,
     [DefaultToolName.Outline]: outlineTool,
     [DefaultToolName.Plan]: planTool,
-    [DefaultToolName.UpdatePlanProgress]: updatePlanProgressTool,
+    [DefaultToolName.Progress]: updatePlanProgressTool,
   },
   [AppDefaultToolkit.WebSearch]: {
     [DefaultToolName.WebSearch]: exaSearchTool,
