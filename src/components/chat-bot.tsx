@@ -245,10 +245,19 @@ export default function ChatBot({ threadId, initialMessages }: Props) {
     threadImageToolModel,
   });
 
+  const [isStopping, setIsStopping] = useState(false);
+
   const isLoading = useMemo(
-    () => status === "streaming" || status === "submitted",
-    [status],
+    () => (status === "streaming" || status === "submitted") && !isStopping,
+    [status, isStopping],
   );
+
+  // Reset stopping state when streaming ends
+  useEffect(() => {
+    if (status !== "streaming" && status !== "submitted") {
+      setIsStopping(false);
+    }
+  }, [status]);
 
   const emptyMessage = useMemo(
     () => messages.length === 0 && !error,
@@ -494,7 +503,10 @@ export default function ChatBot({ threadId, initialMessages }: Props) {
             sendMessage={sendMessage}
             setInput={setInput}
             isLoading={isLoading || isPendingToolCall}
-            onStop={stop}
+            onStop={() => {
+              setIsStopping(true);
+              stop();
+            }}
             onFocus={isFirstTime ? undefined : handleFocus}
           />
         </div>

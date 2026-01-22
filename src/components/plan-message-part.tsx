@@ -9,8 +9,6 @@ import equal from "lib/equal";
 import {
   CheckCircle2,
   ChevronDown,
-  CircleDashed,
-  ListTodo,
   Loader2,
   XCircle,
   Clock,
@@ -56,66 +54,45 @@ function toStepStatus(
   return "pending";
 }
 
-const StatusIcon = ({ status }: { status: StepStatus }) => {
+const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) => {
   return (
-    <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background ring-4 ring-background">
+    <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background">
       <AnimatePresence mode="wait">
         {status === "completed" ? (
           <motion.div
             key="completed"
-            initial={{ scale: 0, opacity: 0, rotate: -180 }}
-            animate={{ scale: 1, opacity: 1, rotate: 0 }}
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 200, damping: 15 }}
+            transition={{ duration: 0.2 }}
           >
-            <CheckCircle2 className="size-5 text-emerald-500" />
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-primary-foreground">
+              <CheckCircle2 className="size-4" />
+            </div>
           </motion.div>
         ) : status === "in_progress" ? (
           <motion.div
             key="in_progress"
             initial={{ scale: 0, opacity: 0 }}
-            animate={{ 
-              scale: 1, 
-              opacity: 1,
-            }}
+            animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 200, damping: 15 }}
+            transition={{ duration: 0.2 }}
           >
-            <motion.div
-              animate={{ 
-                scale: [1, 1.1, 1],
-              }}
-              transition={{ 
-                duration: 2, 
-                repeat: Infinity,
-                ease: "easeInOut" 
-              }}
-            >
-              <Loader2 className="size-5 animate-spin text-blue-500" />
-            </motion.div>
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <span className="text-[10px] font-bold">{index + 1}</span>
+            </div>
           </motion.div>
         ) : status === "failed" ? (
           <motion.div
             key="failed"
             initial={{ scale: 0, opacity: 0 }}
-            animate={{ 
-              scale: 1, 
-              opacity: 1,
-            }}
+            animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 200, damping: 10 }}
+            transition={{ duration: 0.2 }}
           >
-            <motion.div
-              animate={{ 
-                rotate: [0, -10, 10, -10, 0],
-              }}
-              transition={{ 
-                duration: 0.5,
-                times: [0, 0.25, 0.5, 0.75, 1]
-              }}
-            >
-              <XCircle className="size-5 text-red-500" />
-            </motion.div>
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground">
+              <XCircle className="size-4" />
+            </div>
           </motion.div>
         ) : (
           <motion.div
@@ -124,7 +101,9 @@ const StatusIcon = ({ status }: { status: StepStatus }) => {
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0, opacity: 0 }}
           >
-            <CircleDashed className="size-5 text-muted-foreground/40" />
+            <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-muted bg-background text-muted-foreground">
+              <span className="text-[10px] font-medium">{index + 1}</span>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -158,15 +137,17 @@ const ProgressBar = ({
   const hasFailure = failed > 0;
 
   return (
-    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted">
+    <div className="relative h-1 w-full overflow-hidden rounded-full bg-muted">
       <motion.div
         className={cn(
           "h-full rounded-full",
-          hasFailure ? "bg-red-500" : "bg-primary"
+          hasFailure 
+            ? "bg-destructive" 
+            : "bg-primary"
         )}
         initial={{ width: 0 }}
         animate={{ width: `${percentage}%` }}
-        transition={{ duration: 0.5, ease: "easeOut" }}
+        transition={{ duration: 0.6, ease: "easeOut" }}
       />
     </div>
   );
@@ -180,6 +161,7 @@ const PlanStep = ({
   actions,
   outputs,
   progressStep,
+  isCurrent = false,
 }: {
   step: DeepPartial<PlanToolOutput["steps"][number]> | DeepPartial<OutlineToolOutput["steps"][number]>;
   status: StepStatus;
@@ -188,6 +170,7 @@ const PlanStep = ({
   actions?: { label: string; value?: string }[];
   outputs?: Array<{ toolName?: string; output: unknown }>;
   progressStep?: PlanProgress["steps"][number];
+  isCurrent?: boolean;
 }) => {
   const [isExpanded, setIsExpanded] = useState(
     status === "in_progress" || status === "failed",
@@ -231,19 +214,22 @@ const PlanStep = ({
   const complexityLabel = complexity === "3" ? "Complex" : complexity === "2" ? "Moderate" : complexity === "1" ? "Simple" : null;
 
   return (
-    <div className="group relative flex gap-4">
+    <div className={cn(
+      "group relative flex gap-4 transition-all duration-300",
+      isCurrent && "rounded-lg bg-muted/30 -mx-2 px-2 py-2"
+    )}>
       {/* Timeline Line */}
       {!isLast && (
         <div
           className={cn(
-            "absolute left-3 top-8 -bottom-4 w-px bg-border group-last:hidden",
-            status === "completed" ? "bg-primary/20" : "bg-border/50",
+            "absolute left-3 top-8 -bottom-4 w-px -ml-px transition-colors duration-300",
+            status === "completed" ? "bg-primary/20" : "bg-border/40",
           )}
         />
       )}
 
       {/* Status Icon */}
-      <StatusIcon status={status} />
+      <StatusIcon status={status} index={index} />
 
       {/* Content */}
       <div className="flex-1 pb-6">
@@ -255,22 +241,24 @@ const PlanStep = ({
             <div className="flex items-center gap-2 flex-wrap">
               <h4
                 className={cn(
-                  "text-sm font-medium leading-none transition-colors",
-                  status === "completed" && "text-muted-foreground",
-                  status === "in_progress" && "text-primary",
+                  "text-sm font-medium leading-none transition-all duration-300",
+                  status === "completed" && "text-foreground",
+                  status === "in_progress" && "text-primary font-bold",
                   status === "failed" && "text-red-500",
+                  status === "pending" && "text-foreground/70",
+                  isCurrent && "text-primary"
                 )}
               >
                 {step.title || "Generating step..."}
               </h4>
               {complexityLabel && (
                 <span className={cn(
-                  "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                  complexity === "3" && "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300",
-                  complexity === "2" && "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-                  complexity === "1" && "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300"
+                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold shadow-sm",
+                  complexity === "3" && "bg-gradient-to-r from-orange-500 to-orange-600 text-white",
+                  complexity === "2" && "bg-gradient-to-r from-blue-500 to-blue-600 text-white",
+                  complexity === "1" && "bg-gradient-to-r from-green-500 to-green-600 text-white"
                 )}>
-                  <Zap className="size-2.5" />
+                  <Zap className="size-3" />
                   {complexityLabel}
                 </span>
               )}
@@ -281,7 +269,7 @@ const PlanStep = ({
                 </span>
               )}
             </div>
-            {step.description && (
+            {step.description && !isExpanded && (
               <p className="text-xs text-muted-foreground line-clamp-1">
                 {step.description}
               </p>
@@ -308,18 +296,18 @@ const PlanStep = ({
               exit={{ height: 0, opacity: 0 }}
               className="overflow-hidden"
             >
-              <div className="mt-2 space-y-2">
+              <div className="mt-2 space-y-3">
                 {step.description && (
-                  <p className="text-xs text-muted-foreground">
+                  <div className="text-xs text-muted-foreground whitespace-pre-wrap">
                     {step.description}
-                  </p>
+                  </div>
                 )}
                 {displayActions && displayActions.length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {displayActions.map((action, i) => (
                       <div
                         key={i}
-                        className="rounded bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground"
+                        className="inline-flex items-center rounded-full border bg-secondary/50 px-2.5 py-0.5 text-[10px] font-medium text-secondary-foreground transition-colors hover:bg-secondary/70"
                       >
                         {action.label}
                         {action.value && `: ${action.value}`}
@@ -344,12 +332,12 @@ const PlanStep = ({
                       return (
                         <div
                           key={i}
-                          className="rounded-md border bg-background/50 p-2"
+                          className="rounded-lg border bg-card p-3 shadow-sm"
                         >
-                          <div className="mb-1 text-[10px] font-medium text-muted-foreground">
+                          <div className="mb-1.5 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                             {item.toolName ?? "tool"}
                           </div>
-                          <pre className="whitespace-pre-wrap text-xs leading-relaxed">
+                          <pre className="whitespace-pre-wrap text-xs leading-relaxed font-mono">
                             {text}
                           </pre>
                         </div>
@@ -454,28 +442,27 @@ function PurePlanMessagePart({
   return (
     <div
       className={cn(
-        "group overflow-hidden rounded-xl border bg-card/50 text-card-foreground shadow-sm transition-all hover:bg-card/80",
+        "group overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm transition-all",
         className,
       )}
     >
       {/* Header */}
-      <div className="border-b bg-muted/20">
+      <div className="border-b bg-background/50">
         <div
-          className="flex cursor-pointer items-center justify-between px-4 py-3 transition-colors hover:bg-muted/40"
+          className="flex cursor-pointer items-start justify-between px-4 py-3 transition-colors hover:bg-muted/40"
           onClick={() => setIsCollapsed(!isCollapsed)}
         >
-          <div className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
-              <ListTodo className="size-4" />
+          <div className="flex items-start gap-3 flex-1 min-w-0">
+            <div className="flex h-5 w-5 mt-0.5 items-center justify-center rounded-full border-2 border-muted-foreground/30 shrink-0">
+              <div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />
             </div>
-            <div className="flex-1 min-w-0">
-              <h3 className="text-sm font-semibold truncate">{plan.title || "Generating plan..."}</h3>
-              <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+            <div className="flex-1 min-w-0 space-y-1">
+              <h3 className="text-base font-bold leading-none">{plan.title || "Generating plan..."}</h3>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
                   <span className={cn(
-                    "font-medium",
-                    hasFailed && "text-red-500",
-                    isComplete && "text-emerald-500"
+                    "font-medium text-muted-foreground",
+                    hasFailed && "text-destructive"
                   )}>
                     {completedCount}
                   </span>
@@ -490,9 +477,9 @@ function PurePlanMessagePart({
                   </span>
                 )}
                 {isStreaming && (
-                  <span className="flex items-center gap-1 text-primary">
+                  <span className="flex items-center gap-1 text-primary animate-pulse">
                     <Loader2 className="size-3 animate-spin" />
-                    Generating...
+                    {inProgressCount > 0 ? "Executing..." : "Planning..."}
                   </span>
                 )}
               </div>
@@ -500,13 +487,13 @@ function PurePlanMessagePart({
           </div>
           <ChevronDown
             className={cn(
-              "size-4 text-muted-foreground transition-transform duration-200 shrink-0 ml-2",
+              "size-4 text-muted-foreground transition-transform duration-200 shrink-0 ml-2 mt-1",
               isCollapsed && "rotate-180",
             )}
           />
         </div>
         {/* Progress Bar */}
-        <div className="px-4 pb-3">
+        <div className="px-4 pb-4">
           <ProgressBar 
             completed={completedCount} 
             total={steps.length} 
@@ -538,6 +525,7 @@ function PurePlanMessagePart({
                   const actions = progress.steps[index]?.actions;
                   const outputs = stepOutputs?.[index];
                   const progressStep = progress.steps[index];
+                  const isCurrent = progress.currentStepIndex === index;
                   return (
                     <PlanStep
                       key={index}
@@ -548,6 +536,7 @@ function PurePlanMessagePart({
                       actions={actions}
                       outputs={outputs}
                       progressStep={progressStep}
+                      isCurrent={isCurrent}
                     />
                   );
                 })}

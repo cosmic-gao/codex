@@ -30,9 +30,7 @@ import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
 import { detectIntent } from "lib/ai/intent/detector";
 import {
   OUTLINE_GENERATION_PROMPT,
-  buildOutlineExecutionPrompt,
   PLAN_GENERATION_PROMPT,
-  buildPlanExecutionPrompt,
   validateOutline,
 } from "lib/ai/prompts/plan-prompts";
 import { PlanProgressTracker } from "lib/ai/plan/progress-tracker";
@@ -242,8 +240,180 @@ export async function POST(request: Request) {
           planProgressStore,
           dataStream,
         );
+        
+        // Stop progress tracking when request is aborted
+        if (request.signal.aborted) {
+          progressTracker.stop();
+        } else {
+          request.signal.addEventListener("abort", () => {
+            progressTracker.stop();
+          }, { once: true });
+        }
+        
         let activePlanId: string | undefined;
         const emittedPlanIds = new Set<string>();
+
+        const getTextDelta = (chunk: any): string | undefined => {
+          if (!chunk || typeof chunk !== "object") return undefined;
+          if (chunk.type === "text-delta" && typeof chunk.textDelta === "string")
+            return chunk.textDelta;
+          if (chunk.type === "text" && typeof chunk.text === "string") return chunk.text;
+          return undefined;
+        };
+
+        const writeStepStatus = (opt: {
+          planId: string;
+          stepIndex: number;
+          status: "in_progress" | "completed" | "failed";
+          errorMessage?: string;
+        }): void => {
+          const current = planProgressStore.get(opt.planId);
+          if (!current) return;
+
+          while (current.steps.length <= opt.stepIndex) {
+            current.steps.push({ status: "pending" });
+          }
+
+          const prev = current.steps[opt.stepIndex] ?? { status: "pending" };
+          const now = Date.now();
+
+          if (opt.status === "in_progress") {
+            current.steps[opt.stepIndex] = {
+              ...prev,
+              status: "in_progress",
+              startTime: prev.startTime ?? now,
+            };
+            current.currentStepIndex = opt.stepIndex;
+          } else if (opt.status === "completed") {
+            current.steps[opt.stepIndex] = {
+              ...prev,
+              status: "completed",
+              endTime: now,
+              errorMessage: undefined,
+            };
+            const nextIndex =
+              opt.stepIndex + 1 < current.steps.length
+                ? opt.stepIndex + 1
+                : undefined;
+            current.currentStepIndex = nextIndex;
+          } else {
+            current.steps[opt.stepIndex] = {
+              ...prev,
+              status: "failed",
+              endTime: now,
+              errorMessage: opt.errorMessage,
+            };
+            current.currentStepIndex = undefined;
+          }
+
+          planProgressStore.set(opt.planId, current);
+          dataStream.write({
+            type: "data-plan-progress",
+            id: opt.planId,
+            data: current,
+          });
+        };
+
+        const runStep = async (opt: {
+          system: string;
+          tools: Record<string, Tool>;
+          planId: string;
+          stepIndex: number;
+          emitText: boolean;
+        }): Promise<void> => {
+          const stepAbort = new AbortController();
+          if (request.signal.aborted) stepAbort.abort();
+          else
+            request.signal.addEventListener("abort", () => stepAbort.abort(), {
+              once: true,
+            });
+
+          writeStepStatus({
+            planId: opt.planId,
+            stepIndex: opt.stepIndex,
+            status: "in_progress",
+          });
+
+          const result = streamText({
+            model,
+            system: opt.system,
+            messages: await convertToModelMessages(messages),
+            experimental_transform: smoothStream({ chunking: "word" }),
+            maxRetries: 2,
+            tools: opt.tools,
+            toolChoice: "auto",
+            abortSignal: stepAbort.signal,
+          });
+          result.consumeStream();
+
+          let buffer = "";
+          const reader = result
+            .toUIMessageStream({
+              messageMetadata: ({ part }) => {
+                if (part.type == "finish") {
+                  metadata.usage = part.totalUsage;
+                  return metadata;
+                }
+              },
+            })
+            .getReader();
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              if (value.type === "tool-input-available") {
+                progressTracker.trackInput(
+                  value.toolCallId,
+                  value.toolName,
+                  value.input,
+                );
+              } else if (
+                value.type === "tool-output-available" ||
+                value.type === "tool-output-error"
+              ) {
+                const isError = value.type === "tool-output-error";
+                const output = isError ? value.errorText : value.output;
+                progressTracker.trackOutput(value.toolCallId, output, isError);
+              }
+
+              const delta = getTextDelta(value);
+              if (delta !== undefined && !opt.emitText) {
+                buffer += delta;
+                continue;
+              }
+
+              dataStream.write(value as any);
+            }
+          } finally {
+            try {
+              reader.releaseLock();
+            } catch {}
+          }
+
+          if (!opt.emitText) {
+            const text = buffer.trim();
+            if (text.length > 0) {
+              dataStream.write({
+                type: "data-plan-step-output",
+                id: opt.planId,
+                data: {
+                  planId: opt.planId,
+                  stepIndex: opt.stepIndex,
+                  toolName: "assistant",
+                  output: text,
+                },
+              });
+            }
+          }
+
+          writeStepStatus({
+            planId: opt.planId,
+            stepIndex: opt.stepIndex,
+            status: "completed",
+          });
+        };
 
         const mcpClients = await mcpClientsManager.getClients();
         const mcpTools = await mcpClientsManager.tools();
@@ -501,62 +671,46 @@ export async function POST(request: Request) {
             );
 
             const outlineJson = JSON.stringify(outlineData);
-            const { [DefaultToolName.Outline]: _outlineTool, ...executionTools } =
-              vercelAITooles;
+            const {
+              [DefaultToolName.Outline]: _outlineTool,
+              [DefaultToolName.Progress]: _progressTool,
+              ...executionTools
+            } = vercelAITooles;
 
-            const executionResult = streamText({
-              model,
-              system:
-                systemPrompt +
-                "\n\n" +
-                buildOutlineExecutionPrompt(outlineId, outlineJson),
-              messages: await convertToModelMessages(messages),
-              experimental_transform: smoothStream({ chunking: "word" }),
-              maxRetries: 2,
-              tools: executionTools,
-              stopWhen: stepCountIs(10),
-              toolChoice: "auto",
-              abortSignal: request.signal,
-            });
-            executionResult.consumeStream();
-
-            const uiStream = executionResult.toUIMessageStream({
-              messageMetadata: ({ part }) => {
-                if (part.type == "finish") {
-                  metadata.usage = part.totalUsage;
-                  return metadata;
-                }
-              },
-            });
-
-            const tapped = uiStream.pipeThrough(
-              new TransformStream({
-                transform(chunk, controller) {
-                  if (chunk.type === "tool-input-available") {
-                    progressTracker.handleToolInput(
-                      chunk.toolCallId,
-                      chunk.toolName,
-                      chunk.input,
-                    );
-                  } else if (
-                    chunk.type === "tool-output-available" ||
-                    chunk.type === "tool-output-error"
-                  ) {
-                    const isError = chunk.type === "tool-output-error";
-                    const output = isError ? chunk.errorText : chunk.output;
-                    progressTracker.handleToolOutput(
-                      chunk.toolCallId,
-                      output,
-                      isError,
-                    );
-                  }
-
-                  controller.enqueue(chunk);
-                },
-              }),
-            );
-
-            dataStream.merge(tapped);
+            const outlineSteps = Array.isArray((outlineData as any).steps)
+              ? ((outlineData as any).steps as any[])
+              : [];
+            for (let i = 0; i < outlineSteps.length; i += 1) {
+              const step = outlineSteps[i] ?? {};
+              const title =
+                typeof step.title === "string" && step.title.length > 0
+                  ? step.title
+                  : `Step ${i}`;
+              const description =
+                typeof step.description === "string" ? step.description : "";
+              const isLast = i === outlineSteps.length - 1;
+              const system = [
+                systemPrompt,
+                `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n`,
+                `You are a TODO-execution middleware. Execute ONLY step ${i}.\n`,
+                `Step title: ${title}\n`,
+                description.length > 0 ? `Step description: ${description}\n` : "",
+                "Rules:\n",
+                "- Do not execute other steps.\n",
+                "- Do not call outline/plan/progress tools.\n",
+                isLast
+                  ? "- This is the final step. Produce the final deliverable in full.\n"
+                  : "- This is not the final step. Produce only the artifact for this step.\n",
+                "- Stop when the step output is complete.\n",
+              ].join("");
+              await runStep({
+                system,
+                tools: executionTools,
+                planId: outlineId,
+                stepIndex: i,
+                emitText: isLast,
+              });
+            }
             return;
           }
         } else if (isPlanMode && vercelAITooles[DefaultToolName.Plan]) {
@@ -615,60 +769,46 @@ export async function POST(request: Request) {
             );
 
             const planJson = JSON.stringify(planData);
-            const { [DefaultToolName.Plan]: _planTool, ...executionTools } =
-              vercelAITooles;
+            const {
+              [DefaultToolName.Plan]: _planTool,
+              [DefaultToolName.Progress]: _progressTool,
+              ...executionTools
+            } = vercelAITooles;
 
-            const executionResult = streamText({
-              model,
-              system:
-                systemPrompt + "\n\n" + buildPlanExecutionPrompt(planId, planJson),
-              messages: await convertToModelMessages(messages),
-              experimental_transform: smoothStream({ chunking: "word" }),
-              maxRetries: 2,
-              tools: executionTools,
-              stopWhen: stepCountIs(10),
-              toolChoice: "auto",
-              abortSignal: request.signal,
-            });
-            executionResult.consumeStream();
-
-            const uiStream = executionResult.toUIMessageStream({
-              messageMetadata: ({ part }) => {
-                if (part.type == "finish") {
-                  metadata.usage = part.totalUsage;
-                  return metadata;
-                }
-              },
-            });
-
-            const tapped = uiStream.pipeThrough(
-              new TransformStream({
-                transform(chunk, controller) {
-                  if (chunk.type === "tool-input-available") {
-                    progressTracker.handleToolInput(
-                      chunk.toolCallId,
-                      chunk.toolName,
-                      chunk.input,
-                    );
-                  } else if (
-                    chunk.type === "tool-output-available" ||
-                    chunk.type === "tool-output-error"
-                  ) {
-                    const isError = chunk.type === "tool-output-error";
-                    const output = isError ? chunk.errorText : chunk.output;
-                    progressTracker.handleToolOutput(
-                      chunk.toolCallId,
-                      output,
-                      isError,
-                    );
-                  }
-
-                  controller.enqueue(chunk);
-                },
-              }),
-            );
-
-            dataStream.merge(tapped);
+            const planSteps = Array.isArray((planData as any).steps)
+              ? ((planData as any).steps as any[])
+              : [];
+            for (let i = 0; i < planSteps.length; i += 1) {
+              const step = planSteps[i] ?? {};
+              const title =
+                typeof step.title === "string" && step.title.length > 0
+                  ? step.title
+                  : `Step ${i}`;
+              const description =
+                typeof step.description === "string" ? step.description : "";
+              const isLast = i === planSteps.length - 1;
+              const system = [
+                systemPrompt,
+                `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n`,
+                `You are a TODO-execution middleware. Execute ONLY step ${i}.\n`,
+                `Step title: ${title}\n`,
+                description.length > 0 ? `Step description: ${description}\n` : "",
+                "Rules:\n",
+                "- Do not execute other steps.\n",
+                "- Do not call outline/plan/progress tools.\n",
+                isLast
+                  ? "- This is the final step. Produce the final deliverable in full.\n"
+                  : "- This is not the final step. Produce only the artifact for this step.\n",
+                "- Stop when the step output is complete.\n",
+              ].join("");
+              await runStep({
+                system,
+                tools: executionTools,
+                planId,
+                stepIndex: i,
+                emitText: isLast,
+              });
+            }
             return;
           }
         }
@@ -710,7 +850,7 @@ export async function POST(request: Request) {
                 
                 // Handle progress tracking for inline plans
                 if (activePlanId) {
-                  progressTracker.handleToolInput(
+                  progressTracker.trackInput(
                     chunk.toolCallId,
                     chunk.toolName,
                     chunk.input,
@@ -724,7 +864,7 @@ export async function POST(request: Request) {
                 if (activePlanId) {
                   const isError = chunk.type === "tool-output-error";
                   const output = isError ? chunk.errorText : chunk.output;
-                  progressTracker.handleToolOutput(
+                  progressTracker.trackOutput(
                     chunk.toolCallId,
                     output,
                     isError,

@@ -99,37 +99,72 @@ export async function detectIntent(
     messages: [
       {
         role: "system",
-        content: `Analyze the user's request to determine if it requires a structured, multi-step execution plan.${contextPrompt}
+        content: `You are a task complexity analyzer. Determine if the user's request requires a structured, multi-step execution plan with progress tracking.${contextPrompt}
 
 Call the 'detectComplexTask' tool with your analysis.
 
-Set isComplexTask to TRUE if the task:
-1. Requires multiple sequential operations (e.g., "search X, then analyze Y, then write Z")
-2. Involves coordination between different tools or systems
-3. Has clear dependencies between steps (step B depends on step A's output)
-4. Would benefit from showing progress through distinct phases
-5. Is a complex workflow (e.g., "migrate database", "refactor codebase", "research and compare")
+## Criteria for Plan Mode (isComplexTask = TRUE)
 
-Examples requiring plan mode:
-- "Research the top 5 AI frameworks, compare them, and write a summary"
-- "Find all TODO comments in the code, categorize them, and create a report"
-- "Search for React best practices, then refactor our components accordingly"
-- "帮我研究 Vue 3 的新特性，然后写一份迁移指南"
+A task requires plan mode if it meets ANY of these conditions:
 
-Set isComplexTask to FALSE if the task:
-1. Is a simple question or information request
-2. Can be completed in a single operation
-3. Is a straightforward code generation task
-4. Is conversational or exploratory
+1. **Sequential Operations**: Multiple steps that must be done in order
+   - "Research X, then analyze Y, then write Z"
+   - "First gather data, then process it, finally generate a report"
 
-Examples NOT requiring plan mode:
-- "What is React?"
-- "Search for Python tutorials"
-- "Create a login component"
-- "Fix the bug in auth.ts"
-- "Hello, how are you?"
+2. **Multi-Tool Coordination**: Requires using different tools/systems together
+   - "Search the web, read files, then compare findings"
+   - "Query database, transform data, then visualize results"
 
-Provide a confidence score (0-1) for your decision.`,
+3. **Clear Dependencies**: Later steps depend on earlier step outputs
+   - "Find the top 5 options, compare them, choose the best one"
+   - "Analyze code, identify issues, propose fixes"
+
+4. **Complex Workflows**: Well-known multi-phase processes
+   - "Migrate database", "refactor codebase", "conduct research study"
+   - "Write a novel", "create a business plan", "design a system"
+
+5. **Creative Projects**: Multi-chapter/multi-section content creation
+   - "Write a short story with multiple chapters"
+   - "Create a tutorial series with 5 lessons"
+   - "Design a complete UI system"
+
+## Examples Requiring Plan Mode
+
+✅ "Research the top 5 AI frameworks, compare them, and write a summary"
+✅ "Find all TODO comments in the code, categorize them, and create a report"
+✅ "Search for React best practices, then refactor our components accordingly"
+✅ "Write a fantasy novel about a wizard academy with world-building, characters, and plot"
+✅ "Create a migration guide: research Vue 3 features, document changes, write examples"
+✅ "Build a full-stack app: design database, create API, build frontend"
+✅ "Analyze our codebase: find patterns, identify issues, suggest improvements"
+
+## Criteria for Simple Mode (isComplexTask = FALSE)
+
+A task does NOT need plan mode if it:
+
+1. **Simple Question**: Just asking for information
+2. **Single Operation**: Can be done in one step
+3. **Straightforward Task**: No dependencies or sequencing needed
+4. **Conversational**: Chat, greeting, or exploratory discussion
+5. **Quick Generation**: Simple code/content without multiple phases
+
+## Examples NOT Requiring Plan Mode
+
+❌ "What is React?"
+❌ "Search for Python tutorials"
+❌ "Create a login component"
+❌ "Fix the bug in auth.ts"
+❌ "Hello, how are you?"
+❌ "Explain how async/await works"
+❌ "Generate a utility function for date formatting"
+❌ "What's the weather like?"
+
+## Decision Guidelines
+
+- When in doubt, prefer FALSE (simple mode) for better UX
+- Only use TRUE if the task clearly benefits from step-by-step progress tracking
+- Consider: Would breaking this into visible steps help the user understand progress?
+- Provide a confidence score (0-1) reflecting your certainty`,
       },
       { role: "user", content: message },
     ],

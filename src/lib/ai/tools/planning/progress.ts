@@ -5,7 +5,7 @@ export const ProgressInputSchema = z.object({
   planId: z
     .string()
     .describe(
-      "Plan identifier. Use the toolCallId of the plan tool call that created the plan.",
+      "Plan identifier. Use the toolCallId of the plan or outline tool call that created the plan.",
     ),
   stepIndex: z
     .number()

@@ -266,6 +266,11 @@ const PurePreviewMessage = ({
                   part.toolCallId,
                 );
 
+                // Check if there are any in-progress steps to determine streaming state
+                const hasInProgressSteps = progress?.steps.some(s => s.status === "in_progress") ?? false;
+                // Only show as streaming if tool hasn't output AND there are active steps
+                isStreaming = isStreaming && (hasInProgressSteps || !progress);
+
                 return (
                   <PlanMessagePart
                     key={key}

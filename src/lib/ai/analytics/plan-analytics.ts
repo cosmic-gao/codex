@@ -213,7 +213,7 @@ export class PlanAnalytics {
   export(): {
     events: PlanAnalyticsEvent[];
     metrics: PlanMetrics[];
-    stats: ReturnType<typeof this.getAggregatedStats>;
+    stats: ReturnType<PlanAnalytics["getAggregatedStats"]>;
   } {
     return {
       events: this.events,

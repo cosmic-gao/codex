@@ -16,118 +16,167 @@ export interface PromptVariables {
 
 /**
  * Prompt for outline generation phase
+ * 
+ * Inspired by Cursor and LangChain TODO planning patterns
  */
 export const OUTLINE_GENERATION_PROMPT = `
-你必须先调用 outline 工具输出完整的大纲步骤列表，然后停止。
+# Role: Task Decomposition Agent
 
-要求：
-1. 不要在生成大纲的同时执行任何步骤
-2. 大纲包含：title（计划标题）、description（计划描述）、steps（步骤列表）
-3. 每个步骤包含：
-   - title：简洁的步骤名称（1-5个词）
-   - description：步骤的详细说明
-   - dependsOn：依赖的前置步骤索引（可选，数组，0-based）
-   - complexity：复杂度评分（"1"=简单，"2"=中等，"3"=复杂）
-   - estimatedDuration：预估耗时（秒）
+You are a planning agent. Break down the user's request into a structured plan.
+Call the \`outline\` tool with your plan, then STOP. Do NOT execute any steps.
 
-4. 步骤设计原则：
-   - 将任务分解为 3-10 个清晰的步骤
-   - 每个步骤应该是原子性的、可独立执行的
-   - 明确标注步骤间的依赖关系
-   - 合理评估每个步骤的复杂度和耗时
-
-示例大纲：
+## Output Schema
+\`\`\`typescript
 {
-  "title": "研究并对比 AI 框架",
-  "description": "全面分析主流 AI 框架并生成对比报告",
+  title: string;           // Concise plan name
+  description: string;     // Goal summary
+  steps: [                 // 3-10 atomic steps
+    {
+      title: string;              // Action-oriented (1-5 words)
+      description: string;        // Detailed instruction
+      dependsOn?: number[];       // Prerequisite step indices (0-based)
+      complexity?: "1"|"2"|"3";   // 1=Simple, 2=Moderate, 3=Complex
+      estimatedDuration?: number; // Estimated seconds
+    }
+  ]
+}
+\`\`\`
+
+## Planning Principles
+1. **Atomic**: One clear objective per step.
+2. **Sequential**: Logical execution order.
+3. **Dependencies**: Explicitly mark prerequisites.
+4. **Verbs**: Start titles with action verbs (e.g., Analyze, Create, Build).
+5. **No Ambiguity**: Avoid vague terms like "process" or "handle".
+
+## Example
+\`\`\`json
+{
+  "title": "Research AI Frameworks",
+  "description": "Compare top AI frameworks",
   "steps": [
     {
-      "title": "搜索 AI 框架",
-      "description": "查找 2026 年最流行的 5 个 AI 框架",
+      "title": "Search Frameworks",
+      "description": "Find top 5 AI frameworks in 2026",
       "complexity": "1",
       "estimatedDuration": 30
     },
     {
-      "title": "分析框架特性",
-      "description": "收集每个框架的功能、性能、社区数据",
+      "title": "Compare Features",
+      "description": "Analyze pros/cons of each framework",
       "dependsOn": [0],
       "complexity": "2",
-      "estimatedDuration": 60
-    },
-    {
-      "title": "生成对比表格",
-      "description": "创建结构化的框架对比表",
-      "dependsOn": [1],
-      "complexity": "2",
-      "estimatedDuration": 45
+      "estimatedDuration": 90
     }
   ]
 }
+\`\`\`
+
+Call \`outline\` now.
 `.trim();
 
 /**
  * Prompt for outline-based execution phase
+ * 
+ * Inspired by Cursor's step-by-step execution model
  */
 export function buildOutlineExecutionPrompt(
   outlineId: string,
   outlineJson: string,
 ): string {
   return `
+# Role: Task Execution Agent
+
+Execute the plan step-by-step. The user is watching real-time progress.
+
 <outline id="${outlineId}">
 ${outlineJson}
 </outline>
 
-现在开始按该大纲逐步执行：
+## Execution Protocol
+Execute ONE step at a time. Follow this cycle EXACTLY:
 
-执行规则：
-1. 严格按 steps 的顺序执行（从索引 0 到最后）
-2. 每步开始前调用 progress 工具：
-   { planId: "${outlineId}", stepIndex: i, status: "in_progress", currentStepIndex: i }
-3. 每步结束后调用 progress 工具：
-   { planId: "${outlineId}", stepIndex: i, status: "completed", currentStepIndex: i+1 }
-4. 每个步骤必须调用相应的工具来产出实际内容（如搜索、HTTP 请求、代码执行、工作流等）
-5. 工具的输出会自动关联到当前步骤，作为步骤的详细结果
-6. 如果某步失败，调用 progress 工具标记为 failed 并停止执行
-7. 不要再次调用 outline 或 plan 工具
-8. 不要修改大纲中的步骤内容，只更新执行进度
+1. **Start**: Call \`progress({ planId: "${outlineId}", stepIndex: N, status: "in_progress", currentStepIndex: N })\`
+2. **Work**: Perform the task (output content, call tools).
+3. **Finish**: Call \`progress({ planId: "${outlineId}", stepIndex: N, status: "completed", currentStepIndex: N + 1 })\`
 
-注意事项：
-- 遵循 dependsOn 依赖关系，确保前置步骤完成后再执行
-- 根据 complexity 合理分配精力（复杂步骤可能需要多次工具调用）
-- 每个步骤都应该有明确的输出结果
+## Critical Rules
+- **Sequential**: Finish Step N fully BEFORE starting Step N+1.
+- **One by One**: NEVER start multiple steps at once.
+- **Mandatory Progress**: Call \`progress\` at start and end of EACH step.
+- **Real-time Output**: Output content/tool calls between progress updates.
+- **Failures**: If a step fails, call \`progress({ ..., status: "failed", actions: [{ label: "error", value: "reason" }] })\` and STOP.
+
+## Example Flow
+\`\`\`
+[STEP 0]
+→ progress(..., status: "in_progress", ...)
+[...Work/Output...]
+→ progress(..., status: "completed", ...)
+
+[STEP 1]
+→ progress(..., status: "in_progress", ...)
+[...Work/Output...]
+→ progress(..., status: "completed", ...)
+\`\`\`
+
+Begin with Step 0 now.
 `.trim();
 }
 
 /**
  * Prompt for plan generation phase (legacy)
+ * 
+ * Simpler version for backward compatibility
  */
 export const PLAN_GENERATION_PROMPT = `
-你必须先调用 plan 工具输出完整的步骤列表，然后停止。
+# Role: Task Planner
 
-要求：
-1. 不要在生成计划的同时执行任何步骤
-2. 在 plan 工具中，只生成 title 和 description，不要生成 actions
-3. 步骤应该清晰、可执行、有逻辑顺序
+Create a structured task breakdown. Call \`plan\` tool, then STOP.
+
+## Output Schema
+- **title**: Concise name
+- **description**: Goal summary
+- **steps**: Array of objects:
+  - \`title\`: Action verb + object (1-5 words)
+  - \`description\`: Instruction
+  - (No \`actions\` field)
+
+## Rules
+1. No execution during planning.
+2. Atomic, sequential steps.
+3. Logical ordering.
 `.trim();
 
 /**
  * Prompt for plan-based execution phase (legacy)
+ * 
+ * Simpler version for backward compatibility
  */
 export function buildPlanExecutionPrompt(
   planId: string,
   planJson: string,
 ): string {
   return `
+# Role: Task Execution Agent
+
 <plan id="${planId}">
 ${planJson}
 </plan>
 
-现在开始执行该计划：
-- 严格按 steps 的顺序执行（从 0 到最后）
-- 每步开始前调用 progress：{ planId: "${planId}", stepIndex: i, status: "in_progress", currentStepIndex: i }
-- 每步完成后调用 progress：{ planId: "${planId}", stepIndex: i, status: "completed", currentStepIndex: i+1 }
-- 若失败调用 status: "failed" 并停止继续执行
-- 不要再次调用 plan 工具，也不要改写 steps 内容，只更新进度
+## Protocol
+Execute ONE step at a time.
+1. **Start**: \`progress({ planId: "${planId}", stepIndex: N, status: "in_progress", currentStepIndex: N })\`
+2. **Work**: Do the task.
+3. **Finish**: \`progress({ planId: "${planId}", stepIndex: N, status: "completed", currentStepIndex: N + 1 })\`
+
+## Rules
+- Finish Step N fully before starting Step N+1.
+- Mandatory progress calls before/after each step.
+- No parallel execution.
+- If failed: \`progress({ ..., status: "failed" })\` and STOP.
+
+Start with Step 0.
 `.trim();
 }
 
