@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   ChevronDown,
   Loader2,
-  XCircle,
   Clock,
   Zap,
 } from "lucide-react";
@@ -43,21 +42,20 @@ export function getLatestPlanProgress(
   return undefined;
 }
 
-type StepStatus = "pending" | "in_progress" | "completed" | "failed";
+type StepStatus = "pending" | "in_progress" | "completed";
 
 function toStepStatus(
   status: PlanProgress["steps"][number]["status"],
 ): StepStatus {
   if (status === "in_progress") return "in_progress";
   if (status === "completed") return "completed";
-  if (status === "failed") return "failed";
   return "pending";
 }
 
 const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) => {
   return (
     <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-card ring-2 ring-card">
-      <AnimatePresence mode="wait">
+      <AnimatePresence mode="sync">
         {status === "completed" ? (
           <motion.div
             key="completed"
@@ -85,18 +83,6 @@ const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) =>
               </div>
             </div>
           </motion.div>
-        ) : status === "failed" ? (
-          <motion.div
-            key="failed"
-            initial={{ scale: 0, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-          >
-            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm">
-              <XCircle className="size-3.5" strokeWidth={2.5} />
-            </div>
-          </motion.div>
         ) : (
           <motion.div
             key="pending"
@@ -122,6 +108,81 @@ function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.round(seconds % 60);
   return `${minutes}m ${remainingSeconds}s`;
+}
+
+function useNow(isActive: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isActive) return;
+    const interval = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isActive]);
+  return now;
+}
+
+function DurationText({
+  startTime,
+  endTime,
+  isRunning,
+}: {
+  startTime?: number;
+  endTime?: number;
+  isRunning: boolean;
+}) {
+  const now = useNow(isRunning);
+  if (!startTime) return null;
+  const end = endTime ?? now;
+  const seconds = (end - startTime) / 1000;
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+      <Clock className="size-2.5" />
+      {formatDuration(seconds)}
+    </span>
+  );
+}
+
+function PlanDurationText({
+  startTime,
+  endTime,
+  isRunning,
+}: {
+  startTime?: number;
+  endTime?: number;
+  isRunning: boolean;
+}) {
+  const now = useNow(isRunning);
+  if (!startTime) return null;
+  const end = endTime ?? now;
+  const seconds = (end - startTime) / 1000;
+  return (
+    <span className="flex items-center gap-1">
+      <Clock className="size-3" />
+      {formatDuration(seconds)}
+    </span>
+  );
+}
+
+function StatusText({
+  status,
+}: {
+  status: StepStatus;
+}) {
+  const label =
+    status === "completed" ? "完成" : status === "in_progress" ? "进行中" : "等待";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium",
+        status === "completed" && "bg-emerald-500/10 text-emerald-700",
+        status === "in_progress" && "bg-primary/10 text-primary",
+        status === "pending" && "bg-muted/40 text-muted-foreground",
+      )}
+    >
+      {label}
+    </span>
+  );
 }
 
 /**
@@ -178,41 +239,25 @@ const PlanStep = ({
   isCurrent?: boolean;
 }) => {
   const [isExpanded, setIsExpanded] = useState(
-    status === "in_progress" || status === "failed",
+    status === "in_progress" || Boolean(progressStep?.errorMessage),
   );
-  const [currentTime, setCurrentTime] = useState(Date.now());
 
   useEffect(() => {
-    if (status === "in_progress" || status === "failed") {
+    if (status === "in_progress" || Boolean(progressStep?.errorMessage)) {
       setIsExpanded(true);
     }
-  }, [status]);
-
-  // Update current time for live duration display
-  useEffect(() => {
-    if (status === "in_progress" && progressStep?.startTime) {
-      const interval = setInterval(() => {
-        setCurrentTime(Date.now());
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [status, progressStep?.startTime]);
+  }, [status, progressStep?.errorMessage]);
   
   // Use actions from progress if available, otherwise fallback to plan step actions
   const displayActions = actions && actions.length > 0 ? actions : ("actions" in step ? step.actions : undefined);
   const displayOutputs = outputs ?? [];
 
-  // Calculate step duration
-  const duration = useMemo(() => {
-    if (!progressStep) return null;
-    
-    if (progressStep.startTime && progressStep.endTime) {
-      return (progressStep.endTime - progressStep.startTime) / 1000;
-    } else if (progressStep.startTime && status === "in_progress") {
-      return (currentTime - progressStep.startTime) / 1000;
-    }
-    return null;
-  }, [progressStep, status, currentTime]);
+  const errorText = useMemo(() => {
+    const message = progressStep?.errorMessage;
+    if (!message) return undefined;
+    if (message === "aborted") return "已中止";
+    return `错误: ${message}`;
+  }, [progressStep?.errorMessage]);
 
   // Get complexity indicator
   const complexity = (step as any).complexity;
@@ -220,7 +265,7 @@ const PlanStep = ({
 
   return (
     <div className={cn(
-      "group relative flex gap-4 transition-all duration-300 rounded-lg px-2 py-2",
+      "group relative flex gap-4 rounded-lg px-2 py-2 transition-colors duration-200",
       isCurrent ? "bg-muted/40" : "hover:bg-muted/10"
     )}>
       {/* Upper Line (connecting to previous) */}
@@ -256,16 +301,16 @@ const PlanStep = ({
             <div className="flex items-center gap-2 flex-wrap">
               <h4
                 className={cn(
-                  "text-sm font-medium leading-none transition-all duration-300",
+                  "text-sm font-medium leading-none transition-colors duration-200",
                   status === "completed" && "text-foreground",
                   status === "in_progress" && "text-primary font-bold",
-                  status === "failed" && "text-red-500",
                   status === "pending" && "text-muted-foreground",
                   isCurrent && "text-primary"
                 )}
               >
                 {step.title || "Generating step..."}
               </h4>
+              <StatusText status={status} />
               {complexityLabel && (
                 <span className={cn(
                   "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold shadow-sm",
@@ -277,21 +322,20 @@ const PlanStep = ({
                   {complexityLabel}
                 </span>
               )}
-              {duration !== null && (
-                <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-                  <Clock className="size-2.5" />
-                  {formatDuration(duration)}
-                </span>
-              )}
+              <DurationText
+                startTime={progressStep?.startTime}
+                endTime={progressStep?.endTime}
+                isRunning={status === "in_progress" && Boolean(progressStep?.startTime)}
+              />
             </div>
             {step.description && !isExpanded && (
               <p className="text-xs text-muted-foreground line-clamp-1">
                 {step.description}
               </p>
             )}
-            {progressStep?.errorMessage && (
+            {errorText && (
               <p className="text-xs text-red-500 line-clamp-2">
-                Error: {progressStep.errorMessage}
+                {errorText}
               </p>
             )}
           </div>
@@ -378,7 +422,6 @@ function PurePlanMessagePart({
   className,
 }: Props) {
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [currentTime, setCurrentTime] = useState(Date.now());
 
   const steps = plan.steps || [];
 
@@ -416,7 +459,7 @@ function PurePlanMessagePart({
     );
 
     if (stepsWithTiming.length === 0) {
-      return { totalDuration: 0, hasStarted: false };
+      return { startTime: undefined, endTime: undefined, hasStarted: false };
     }
 
     const startTimes = stepsWithTiming
@@ -429,35 +472,19 @@ function PurePlanMessagePart({
     const minStart = startTimes.length > 0 ? Math.min(...startTimes) : undefined;
     const maxEnd = endTimes.length > 0 ? Math.max(...endTimes) : undefined;
 
-    // If there are in-progress steps, use current time as end
-    const effectiveEnd = inProgressCount > 0 ? currentTime : maxEnd;
-
-    const totalDuration =
-      minStart && effectiveEnd ? (effectiveEnd - minStart) / 1000 : 0;
-
     return {
-      totalDuration,
+      startTime: minStart,
+      endTime: maxEnd,
       hasStarted: minStart !== undefined,
     };
-  }, [progress.steps, inProgressCount, currentTime]);
+  }, [progress.steps]);
 
-  // Update current time every second for live timing
-  useEffect(() => {
-    if (inProgressCount > 0) {
-      const interval = setInterval(() => {
-        setCurrentTime(Date.now());
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [inProgressCount]);
-
-  const isComplete = completedCount === steps.length && steps.length > 0;
   const hasFailed = failedCount > 0;
 
   return (
     <div
       className={cn(
-        "group overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm transition-all",
+        "group overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm transition-shadow",
         className,
       )}
     >
@@ -472,7 +499,7 @@ function PurePlanMessagePart({
               <div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />
             </div>
             <div className="flex-1 min-w-0 space-y-1">
-              <h3 className="text-base font-bold leading-none">{plan.title || "Generating plan..."}</h3>
+              <h3 className="text-base font-bold leading-none">{plan.title || "生成计划中..."}</h3>
               <div className="flex items-center gap-3 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
                   <span className={cn(
@@ -483,18 +510,19 @@ function PurePlanMessagePart({
                   </span>
                   <span>/</span>
                   <span>{steps.length}</span>
-                  <span>completed</span>
+                  <span>已完成</span>
                 </span>
                 {timingMetrics.hasStarted && (
-                  <span className="flex items-center gap-1">
-                    <Clock className="size-3" />
-                    {formatDuration(timingMetrics.totalDuration)}
-                  </span>
+                  <PlanDurationText
+                    startTime={timingMetrics.startTime}
+                    endTime={timingMetrics.endTime}
+                    isRunning={inProgressCount > 0}
+                  />
                 )}
                 {isStreaming && (
                   <span className="flex items-center gap-1 text-primary animate-pulse">
                     <Loader2 className="size-3 animate-spin" />
-                    {inProgressCount > 0 ? "Executing..." : "Planning..."}
+                    {inProgressCount > 0 ? "执行中..." : "规划中..."}
                   </span>
                 )}
               </div>

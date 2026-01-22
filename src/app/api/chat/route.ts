@@ -261,92 +261,136 @@ export async function POST(request: Request) {
           return undefined;
         };
 
-        const writeStepStatus = (opt: {
+        const ABORT_ERROR_MESSAGE = "aborted";
+        type StepRunResult = "completed" | "aborted" | "failed";
+
+        const isAborted = (): boolean =>
+          request.signal.aborted;
+
+        /**
+         * @description
+         * Update server-side plan progress for a single step and emit a progress part.
+         * This is the authoritative step status writer for plan-mode execution.
+         *
+         * @param stepUpdate Plan step update payload.
+         */
+        const writeStepStatus = (stepUpdate: {
           planId: string;
           stepIndex: number;
           status: "in_progress" | "completed" | "failed";
           errorMessage?: string;
         }): void => {
-          const current = planProgressStore.get(opt.planId);
+          const current = planProgressStore.get(stepUpdate.planId);
           if (!current) return;
 
-          while (current.steps.length <= opt.stepIndex) {
+          while (current.steps.length <= stepUpdate.stepIndex) {
             current.steps.push({ status: "pending" });
           }
 
-          const prev = current.steps[opt.stepIndex] ?? { status: "pending" };
+          const prev = current.steps[stepUpdate.stepIndex] ?? { status: "pending" };
           const now = Date.now();
 
-          if (opt.status === "in_progress") {
-            current.steps[opt.stepIndex] = {
+          if (stepUpdate.status === "in_progress") {
+            current.steps[stepUpdate.stepIndex] = {
               ...prev,
               status: "in_progress",
               startTime: prev.startTime ?? now,
             };
-            current.currentStepIndex = opt.stepIndex;
-          } else if (opt.status === "completed") {
-            current.steps[opt.stepIndex] = {
+            current.currentStepIndex = stepUpdate.stepIndex;
+          } else if (stepUpdate.status === "completed") {
+            current.steps[stepUpdate.stepIndex] = {
               ...prev,
               status: "completed",
               endTime: now,
               errorMessage: undefined,
             };
             const nextIndex =
-              opt.stepIndex + 1 < current.steps.length
-                ? opt.stepIndex + 1
+              stepUpdate.stepIndex + 1 < current.steps.length
+                ? stepUpdate.stepIndex + 1
                 : undefined;
             current.currentStepIndex = nextIndex;
           } else {
-            current.steps[opt.stepIndex] = {
+            current.steps[stepUpdate.stepIndex] = {
               ...prev,
               status: "failed",
               endTime: now,
-              errorMessage: opt.errorMessage,
+              errorMessage: stepUpdate.errorMessage,
             };
             current.currentStepIndex = undefined;
           }
 
-          planProgressStore.set(opt.planId, current);
+          planProgressStore.set(stepUpdate.planId, current);
           dataStream.write({
             type: "data-plan-progress",
-            id: opt.planId,
+            id: stepUpdate.planId,
             data: current,
           });
         };
 
-        const runStep = async (opt: {
+        const createAbortController = (): AbortController => {
+          const abortController = new AbortController();
+          if (request.signal.aborted) abortController.abort();
+          else {
+            request.signal.addEventListener("abort", () => abortController.abort(), {
+              once: true,
+            });
+          }
+          return abortController;
+        };
+
+        /**
+         * @description
+         * Execute a single plan step in plan-mode and emit step-bound outputs and progress.
+         * Abort/stop must immediately prevent further step execution.
+         *
+         * @param stepRun Step execution request.
+         * @returns Step run result: completed | aborted | failed.
+         */
+        const runStep = async (stepRun: {
           system: string;
           tools: Record<string, Tool>;
           planId: string;
           stepIndex: number;
           emitText: boolean;
-        }): Promise<void> => {
-          const stepAbort = new AbortController();
-          if (request.signal.aborted) stepAbort.abort();
-          else
-            request.signal.addEventListener("abort", () => stepAbort.abort(), {
-              once: true,
-            });
+        }): Promise<StepRunResult> => {
+          const stepAbort = createAbortController();
+          const isStepAborted = (): boolean => stepAbort.signal.aborted || isAborted();
 
           writeStepStatus({
-            planId: opt.planId,
-            stepIndex: opt.stepIndex,
+            planId: stepRun.planId,
+            stepIndex: stepRun.stepIndex,
             status: "in_progress",
           });
 
           const result = streamText({
             model,
-            system: opt.system,
+            system: stepRun.system,
             messages: await convertToModelMessages(messages),
             experimental_transform: smoothStream({ chunking: "word" }),
             maxRetries: 2,
-            tools: opt.tools,
+            tools: stepRun.tools,
             toolChoice: "auto",
             abortSignal: stepAbort.signal,
           });
           result.consumeStream();
 
-          let buffer = "";
+          const textBufferParts: Array<string> = [];
+          const toolNameByToolCallId = new Map<string, string>();
+          const writeStepOutput = (payload: {
+            toolName: string;
+            output: unknown;
+          }): void => {
+            dataStream.write({
+              type: "data-plan-step-output",
+              id: stepRun.planId,
+              data: {
+                planId: stepRun.planId,
+                stepIndex: stepRun.stepIndex,
+                toolName: payload.toolName,
+                output: payload.output,
+              },
+            });
+          };
           const reader = result
             .toUIMessageStream({
               messageMetadata: ({ part }) => {
@@ -364,27 +408,45 @@ export async function POST(request: Request) {
               if (done) break;
 
               if (value.type === "tool-input-available") {
-                progressTracker.trackInput(
-                  value.toolCallId,
-                  value.toolName,
-                  value.input,
-                );
+                toolNameByToolCallId.set(value.toolCallId, value.toolName);
               } else if (
                 value.type === "tool-output-available" ||
                 value.type === "tool-output-error"
               ) {
                 const isError = value.type === "tool-output-error";
                 const output = isError ? value.errorText : value.output;
-                progressTracker.trackOutput(value.toolCallId, output, isError);
+                const toolName = toolNameByToolCallId.get(value.toolCallId);
+                if (toolName) {
+                  writeStepOutput({
+                    toolName,
+                    output: isError ? `Error: ${output}` : output,
+                  });
+                }
+                if (isError) {
+                  dataStream.write(value as any);
+                  writeStepStatus({
+                    planId: stepRun.planId,
+                    stepIndex: stepRun.stepIndex,
+                    status: "failed",
+                    errorMessage: String(output),
+                  });
+                  return "failed";
+                }
               }
 
               const delta = getTextDelta(value);
-              if (delta !== undefined && !opt.emitText) {
-                buffer += delta;
-                continue;
+              if (delta !== undefined) {
+                textBufferParts.push(delta);
+                if (!stepRun.emitText) {
+                  continue;
+                }
               }
 
               dataStream.write(value as any);
+
+              if (isStepAborted()) {
+                break;
+              }
             }
           } finally {
             try {
@@ -392,27 +454,27 @@ export async function POST(request: Request) {
             } catch {}
           }
 
-          if (!opt.emitText) {
-            const text = buffer.trim();
-            if (text.length > 0) {
-              dataStream.write({
-                type: "data-plan-step-output",
-                id: opt.planId,
-                data: {
-                  planId: opt.planId,
-                  stepIndex: opt.stepIndex,
-                  toolName: "assistant",
-                  output: text,
-                },
-              });
-            }
+          if (isStepAborted()) {
+            writeStepStatus({
+              planId: stepRun.planId,
+              stepIndex: stepRun.stepIndex,
+              status: "failed",
+              errorMessage: ABORT_ERROR_MESSAGE,
+            });
+            return "aborted";
+          }
+
+          const text = textBufferParts.join("").trim();
+          if (text.length > 0) {
+            writeStepOutput({ toolName: "assistant", output: text });
           }
 
           writeStepStatus({
-            planId: opt.planId,
-            stepIndex: opt.stepIndex,
+            planId: stepRun.planId,
+            stepIndex: stepRun.stepIndex,
             status: "completed",
           });
+          return "completed";
         };
 
         const mcpClients = await mcpClientsManager.getClients();
@@ -681,6 +743,7 @@ export async function POST(request: Request) {
               ? ((outlineData as any).steps as any[])
               : [];
             for (let i = 0; i < outlineSteps.length; i += 1) {
+              if (request.signal.aborted) return;
               const step = outlineSteps[i] ?? {};
               const title =
                 typeof step.title === "string" && step.title.length > 0
@@ -692,24 +755,29 @@ export async function POST(request: Request) {
               const system = [
                 systemPrompt,
                 `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n`,
-                `You are a TODO-execution middleware. Execute ONLY step ${i}.\n`,
+                `You are a step-execution middleware. Execute ONLY step ${i}.\n`,
                 `Step title: ${title}\n`,
                 description.length > 0 ? `Step description: ${description}\n` : "",
                 "Rules:\n",
-                "- Do not execute other steps.\n",
+                "- Your output MUST correspond strictly to this step only.\n",
+                "- Do not include work from other steps, even if it seems helpful.\n",
+                "- Do not reference future steps or start the next step.\n",
+                "- Do not revise the plan.\n",
+                "- If the step requests a specific artifact (file, snippet, payload), output only that artifact.\n",
                 "- Do not call outline/plan/progress tools.\n",
                 isLast
                   ? "- This is the final step. Produce the final deliverable in full.\n"
                   : "- This is not the final step. Produce only the artifact for this step.\n",
                 "- Stop when the step output is complete.\n",
               ].join("");
-              await runStep({
+              const result = await runStep({
                 system,
                 tools: executionTools,
                 planId: outlineId,
                 stepIndex: i,
                 emitText: isLast,
               });
+              if (result !== "completed") return;
             }
             return;
           }
@@ -779,6 +847,7 @@ export async function POST(request: Request) {
               ? ((planData as any).steps as any[])
               : [];
             for (let i = 0; i < planSteps.length; i += 1) {
+              if (request.signal.aborted) return;
               const step = planSteps[i] ?? {};
               const title =
                 typeof step.title === "string" && step.title.length > 0
@@ -790,24 +859,29 @@ export async function POST(request: Request) {
               const system = [
                 systemPrompt,
                 `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n`,
-                `You are a TODO-execution middleware. Execute ONLY step ${i}.\n`,
+                `You are a step-execution middleware. Execute ONLY step ${i}.\n`,
                 `Step title: ${title}\n`,
                 description.length > 0 ? `Step description: ${description}\n` : "",
                 "Rules:\n",
-                "- Do not execute other steps.\n",
+                "- Your output MUST correspond strictly to this step only.\n",
+                "- Do not include work from other steps, even if it seems helpful.\n",
+                "- Do not reference future steps or start the next step.\n",
+                "- Do not revise the plan.\n",
+                "- If the step requests a specific artifact (file, snippet, payload), output only that artifact.\n",
                 "- Do not call outline/plan/progress tools.\n",
                 isLast
                   ? "- This is the final step. Produce the final deliverable in full.\n"
                   : "- This is not the final step. Produce only the artifact for this step.\n",
                 "- Stop when the step output is complete.\n",
               ].join("");
-              await runStep({
+              const result = await runStep({
                 system,
                 tools: executionTools,
                 planId,
                 stepIndex: i,
                 emitText: isLast,
               });
+              if (result !== "completed") return;
             }
             return;
           }

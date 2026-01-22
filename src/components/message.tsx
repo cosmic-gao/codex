@@ -171,11 +171,12 @@ const PurePreviewMessage = ({
                 (typeof parsedOutlinePart.data.data.title === "string"
                   ? `${message.id}:${parsedOutlinePart.data.data.title}`
                   : message.id);
+              const outlineKey = `message-${messageIndex}-outline-${outlineId}`;
               const progress = getLatestPlanProgress(partsForDisplay, outlineId);
               const stepOutputs = getPlanStepOutputs(partsForDisplay, outlineId);
               return (
                 <PlanMessagePart
-                  key={key}
+                  key={outlineKey}
                   plan={parsedOutlinePart.data.data}
                   planId={outlineId}
                   progress={progress}
@@ -192,13 +193,14 @@ const PurePreviewMessage = ({
                 (typeof parsedPlanPart.data.data.title === "string"
                   ? `${message.id}:${parsedPlanPart.data.data.title}`
                   : message.id);
+              const planKey = `message-${messageIndex}-plan-${planId}`;
               
               const progress = getLatestPlanProgress(partsForDisplay, planId);
               const stepOutputs = getPlanStepOutputs(partsForDisplay, planId);
 
               return (
                 <PlanMessagePart
-                  key={key}
+                  key={planKey}
                   plan={parsedPlanPart.data.data}
                   planId={planId}
                   progress={progress}
@@ -304,7 +306,7 @@ const PurePreviewMessage = ({
 
                 return (
                   <PlanMessagePart
-                    key={key}
+                    key={`message-${messageIndex}-plan-tool-${part.toolCallId}`}
                     plan={planData}
                     planId={part.toolCallId}
                     progress={progress}
