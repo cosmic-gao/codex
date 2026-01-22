@@ -1,9 +1,7 @@
 {
-  "name": "better-chatbot",
-  "version": "1.26.0",
+  "name": "codex",
+  "version": "0.0.1",
   "private": true,
-  "author": "cgoinglove",
-  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "next dev",
@@ -132,9 +130,6 @@
     "typescript": "^5.9.3",
     "vite-tsconfig-paths": "^6.0.4",
     "vitest": "^4.0.17"
-  },
-  "engines": {
-    "node": ">=18"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
