@@ -13,9 +13,9 @@ import {
 import { WorkflowRuntimeState } from "./graph-store";
 import {
   convertToModelMessages,
-  generateObject,
   generateText,
   UIMessage,
+  Output,
 } from "ai";
 import { checkConditionBranch } from "../condition";
 import {
@@ -124,17 +124,19 @@ export const llmNodeExecutor: NodeExecutor<LLMNodeData> = async ({
     };
   }
 
-  const response = await generateObject({
+  const response = await generateText({
     model,
+    output: Output.object({
+      schema: jsonSchemaToZod(node.outputSchema.properties.answer),
+    }),
     messages: await convertToModelMessages(messages),
-    schema: jsonSchemaToZod(node.outputSchema.properties.answer),
     maxRetries: 3,
   });
 
   return {
     output: {
       totalTokens: response.usage.totalTokens,
-      answer: response.object,
+      answer: response.output,
     },
   };
 };

@@ -1,9 +1,9 @@
 "use server";
 
 import {
-  generateObject,
   generateText,
   jsonSchema,
+  tool as createTool,
   LanguageModel,
   type UIMessage,
 } from "ai";
@@ -114,6 +114,24 @@ export async function deleteUnarchivedThreadsAction() {
   await chatRepository.deleteUnarchivedThreads(userId);
 }
 
+/**
+ * Generate example tool schema
+ *
+ * @description
+ * Uses LLM to generate example input parameters for a given MCP tool based on its schema.
+ * Forces the model to call a tool with the target schema to produce valid example data.
+ *
+ * @param options.model - The chat model to use for generation
+ * @param options.toolInfo - MCP tool information including input schema
+ * @param options.prompt - Optional custom prompt to guide example generation
+ * @returns {Promise<any>} Generated example object matching the tool's input schema
+ *
+ * @example
+ * const example = await generateExampleToolSchemaAction({
+ *   model: { provider: 'openai', model: 'gpt-4' },
+ *   toolInfo: { name: 'search', inputSchema: {...} }
+ * });
+ */
 export async function generateExampleToolSchemaAction(options: {
   model?: ChatModel;
   toolInfo: MCPToolInfo;
@@ -128,16 +146,34 @@ export async function generateExampleToolSchemaAction(options: {
       additionalProperties: false,
     }),
   );
-  const { object } = await generateObject({
+
+  let resultObject: any = null;
+
+  await generateText({
     model,
-    schema,
-    prompt: generateExampleToolSchemaPrompt({
-      toolInfo: options.toolInfo,
-      prompt: options.prompt,
-    }),
+    tools: {
+      generate_example: createTool({
+        description: "Generate an example input for the tool",
+        inputSchema: schema,
+        execute: (args) => {
+          resultObject = args;
+          return "Example generated successfully";
+        },
+      }),
+    },
+    toolChoice: "required",
+    messages: [
+      {
+        role: "user",
+        content: generateExampleToolSchemaPrompt({
+          toolInfo: options.toolInfo,
+          prompt: options.prompt,
+        }),
+      },
+    ],
   });
 
-  return object;
+  return resultObject;
 }
 
 export async function rememberMcpServerCustomizationsAction(userId: string) {
@@ -191,6 +227,27 @@ export async function rememberMcpServerCustomizationsAction(userId: string) {
   return prompts;
 }
 
+/**
+ * Generate structured object
+ *
+ * @description
+ * Uses LLM to generate structured data conforming to a JSON schema.
+ * Forces the model to call a tool with the provided schema to ensure type-safe output.
+ *
+ * @param model - Optional chat model configuration
+ * @param prompt.system - System prompt to guide generation behavior
+ * @param prompt.user - User prompt describing what to generate
+ * @param schema - JSON Schema defining the structure of the output
+ * @returns {Promise<any>} Generated object matching the schema
+ * @throws {Error} If model fails to generate valid output
+ *
+ * @example
+ * const result = await generateObjectAction({
+ *   model: { provider: 'openai', model: 'gpt-4' },
+ *   prompt: { user: 'Generate a user profile' },
+ *   schema: { type: 'object', properties: { name: { type: 'string' } } }
+ * });
+ */
 export async function generateObjectAction({
   model,
   prompt,
@@ -203,13 +260,39 @@ export async function generateObjectAction({
   };
   schema: JSONSchema7 | ObjectJsonSchema7;
 }) {
-  const result = await generateObject({
+  let resultObject: any = null;
+  const zodSchema = jsonSchemaToZod(schema);
+
+  await generateText({
     model: customModelProvider.getModel(model),
-    system: prompt.system,
-    prompt: prompt.user || "",
-    schema: jsonSchemaToZod(schema),
+    tools: {
+      generate_content: createTool({
+        description: "Generate structured content based on the schema",
+        inputSchema: zodSchema,
+        execute: (args) => {
+          resultObject = args;
+          return "Content generated successfully";
+        },
+      }),
+    },
+    toolChoice: "required",
+    messages: [
+      {
+        role: "system",
+        content:
+          prompt.system ||
+          "You are a helpful assistant. Please generate structured data based on the user's request using the 'generate_content' tool.",
+      },
+      {
+        role: "user",
+        content:
+          prompt.user ||
+          "Please generate the content based on the schema provided in the tool definition.",
+      },
+    ],
   });
-  return result.object;
+
+  return resultObject;
 }
 
 export async function rememberAgentAction(

@@ -40,7 +40,7 @@ import { NodeKind } from "lib/ai/workflow/workflow.interface";
 import { mcpClientsManager } from "lib/ai/mcp/mcp-manager";
 import { APP_DEFAULT_TOOL_KIT } from "lib/ai/tools/tool-kit";
 import { AppDefaultToolkit, DefaultToolName } from "lib/ai/tools";
-import { UpdatePlanProgressInputSchema, UpdatePlanProgressInput } from "lib/ai/tools/planning/update-plan-progress";
+import { ProgressInputSchema, ProgressInput } from "lib/ai/tools/planning/progress";
 import { PlanToolOutputSchema, OutlineToolOutputSchema } from "app-types/plan";
 
 function stripProviderMetadata<P extends UIMessage["parts"][number]>(part: P): P {
@@ -458,7 +458,7 @@ export const loadAppDefaultTools = (opt?: {
 }) =>
   safe(APP_DEFAULT_TOOL_KIT)
     .map((tools) => {
-      const bindUpdatePlanProgressTool = (
+      const bindProgressTool = (
         selected: Record<string, Tool>,
       ): Record<string, Tool> => {
         if (!opt?.dataStream || !opt.planProgressStore) return selected;
@@ -470,8 +470,8 @@ export const loadAppDefaultTools = (opt?: {
           ...selected,
           [DefaultToolName.Progress]: createTool({
             description: selected[DefaultToolName.Progress]!.description,
-            inputSchema: UpdatePlanProgressInputSchema,
-            execute: async (input: UpdatePlanProgressInput) => {
+            inputSchema: ProgressInputSchema,
+            execute: async (input: ProgressInput) => {
               const planId = input.planId;
               opt.setActivePlanId?.(planId);
 
@@ -524,7 +524,7 @@ export const loadAppDefaultTools = (opt?: {
           });
           return { ...acc, ...allowed };
         }, {});
-        return bindUpdatePlanProgressTool(selected);
+        return bindProgressTool(selected);
       }
       const allowedAppDefaultToolkit =
         opt?.allowedAppDefaultToolkit ?? Object.values(AppDefaultToolkit);
@@ -537,7 +537,7 @@ export const loadAppDefaultTools = (opt?: {
           {} as Record<string, Tool>,
         ) || {};
 
-      return bindUpdatePlanProgressTool(selected);
+      return bindProgressTool(selected);
     })
     .ifFail((e) => {
       console.error(e);

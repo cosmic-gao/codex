@@ -43,6 +43,10 @@ export type PlanProgressStatus = z.infer<typeof PlanProgressStatusSchema>;
 export const PlanProgressStepSchema = z.object({
   status: PlanProgressStatusSchema,
   actions: z.array(PlanActionSchema).optional(),
+  startTime: z.number().optional(),
+  endTime: z.number().optional(),
+  toolCalls: z.array(z.string()).optional(),
+  errorMessage: z.string().optional(),
 });
 
 export type PlanProgressStep = z.infer<typeof PlanProgressStepSchema>;
@@ -66,6 +70,12 @@ export type PlanProgressDataPart = z.infer<typeof PlanProgressDataPartSchema>;
 export const OutlineStepSchema = z.object({
   title: z.string(),
   description: z.string().optional(),
+  /** Dependencies: indices of steps that must complete before this one */
+  dependsOn: z.array(z.number().int().nonnegative()).optional(),
+  /** Complexity score: 1=simple, 2=moderate, 3=complex */
+  complexity: z.enum(["1", "2", "3"]).optional(),
+  /** Estimated duration in seconds */
+  estimatedDuration: z.number().int().positive().optional(),
 });
 
 export type OutlineStep = z.infer<typeof OutlineStepSchema>;

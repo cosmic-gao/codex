@@ -28,7 +28,15 @@ import {
 import { DefaultToolName } from "lib/ai/tools";
 import { OutlineToolOutputSchema, PlanToolOutputSchema } from "app-types/plan";
 import { detectIntent } from "lib/ai/intent/detector";
-import { UpdatePlanProgressInput } from "lib/ai/tools/planning/update-plan-progress";
+import {
+  OUTLINE_GENERATION_PROMPT,
+  buildOutlineExecutionPrompt,
+  PLAN_GENERATION_PROMPT,
+  buildPlanExecutionPrompt,
+  validateOutline,
+} from "lib/ai/prompts/plan-prompts";
+import { PlanProgressTracker } from "lib/ai/plan/progress-tracker";
+import { recordPlanCreated } from "lib/ai/analytics/plan-analytics";
 
 import { errorIf, safe } from "ts-safe";
 
@@ -222,10 +230,18 @@ export async function POST(request: Request) {
             steps: Array<{
               status: "pending" | "in_progress" | "completed" | "failed";
               actions?: { label: string; value?: string }[];
+              startTime?: number;
+              endTime?: number;
+              toolCalls?: string[];
+              errorMessage?: string;
             }>;
             currentStepIndex?: number;
           }
         >();
+        const progressTracker = new PlanProgressTracker(
+          planProgressStore,
+          dataStream,
+        );
         let activePlanId: string | undefined;
         const emittedPlanIds = new Set<string>();
 
@@ -310,8 +326,19 @@ export async function POST(request: Request) {
           .map((p) => p.text)
           .join("\n");
         
-        // Smart intent detection
-        const isPlanMode = await detectIntent(model, messageText);
+        // Smart intent detection with conversation history
+        const conversationHistory = messages
+          .slice(-5) // Last 5 messages for context
+          .filter((m) => m.role === "user")
+          .flatMap((m) =>
+            m.parts
+              .filter((p): p is Extract<typeof m.parts[number], { type: "text" }> => p.type === "text")
+              .map((p) => p.text)
+          );
+        
+        const isPlanMode = await detectIntent(model, messageText, {
+          conversationHistory,
+        });
 
         const IMAGE_TOOL: Record<string, Tool> = useImageTool
           ? {
@@ -410,10 +437,6 @@ export async function POST(request: Request) {
           });
         };
 
-        const toolNameByToolCallId = new Map<string, string>();
-        let isExplicitPlanProgress = false;
-        let stepIndexForStepOutput: number | undefined;
-
         if (isPlanMode && vercelAITooles[DefaultToolName.Outline]) {
           const outlineAbort = new AbortController();
           if (request.signal.aborted) outlineAbort.abort();
@@ -424,9 +447,7 @@ export async function POST(request: Request) {
 
           const outlineOnlyResult = streamText({
             model,
-            system:
-              systemPrompt +
-              `\n\n你必须先调用 outline 工具输出完整的大纲步骤列表，然后停止。不要在生成大纲的同时执行任何步骤。大纲只包含 title、description、steps（steps 只包含 title、description）。`,
+            system: systemPrompt + "\n\n" + OUTLINE_GENERATION_PROMPT,
             messages: await convertToModelMessages(messages),
             experimental_transform: smoothStream({ chunking: "word" }),
             maxRetries: 2,
@@ -462,7 +483,23 @@ export async function POST(request: Request) {
           }
 
           if (outlineId && outlineData) {
+            // Validate outline quality
+            const validation = validateOutline(outlineData);
+            if (!validation.valid) {
+              logger.warn(`Outline validation failed: ${validation.errors.join(", ")}`);
+            }
+
             writeOutlineSnapshot(outlineId, outlineData);
+            progressTracker.setActivePlanId(outlineId);
+            activePlanId = outlineId;
+
+            // Record analytics
+            recordPlanCreated(
+              outlineId,
+              (outlineData as any).title || "Untitled Plan",
+              (outlineData as any).steps?.length || 0
+            );
+
             const outlineJson = JSON.stringify(outlineData);
             const { [DefaultToolName.Outline]: _outlineTool, ...executionTools } =
               vercelAITooles;
@@ -471,7 +508,8 @@ export async function POST(request: Request) {
               model,
               system:
                 systemPrompt +
-                `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n\n现在开始按该大纲逐步执行：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步结束后调用 progress：{ planId:\"${outlineId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 每步需要调用其它工具产出内容（例如搜索/HTTP/代码执行/工作流等），并让工具输出作为该步骤的详情\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要调用 outline/plan 工具，也不要改写 steps 内容，只更新进度\n`,
+                "\n\n" +
+                buildOutlineExecutionPrompt(outlineId, outlineJson),
               messages: await convertToModelMessages(messages),
               experimental_transform: smoothStream({ chunking: "word" }),
               maxRetries: 2,
@@ -495,87 +533,22 @@ export async function POST(request: Request) {
               new TransformStream({
                 transform(chunk, controller) {
                   if (chunk.type === "tool-input-available") {
-                    toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
-                    if (chunk.toolName === DefaultToolName.Progress) {
-                      isExplicitPlanProgress = true;
-                      const input = chunk.input as UpdatePlanProgressInput;
-                      if (typeof input?.currentStepIndex === "number") {
-                        stepIndexForStepOutput = input.currentStepIndex;
-                      } else if (typeof input?.stepIndex === "number") {
-                        stepIndexForStepOutput = input.stepIndex;
-                      }
-                    } else if (!isExplicitPlanProgress && activePlanId) {
-                      const current = planProgressStore.get(activePlanId);
-                      if (current?.currentStepIndex !== undefined) {
-                        const idx = current.currentStepIndex;
-                        if (current.steps[idx]?.status === "pending") {
-                          current.steps[idx] = { status: "in_progress" };
-                          dataStream.write({
-                            type: "data-plan-progress",
-                            id: activePlanId,
-                            data: current,
-                          });
-                        }
-                      }
-                    }
+                    progressTracker.handleToolInput(
+                      chunk.toolCallId,
+                      chunk.toolName,
+                      chunk.input,
+                    );
                   } else if (
                     chunk.type === "tool-output-available" ||
                     chunk.type === "tool-output-error"
                   ) {
-                    const toolName = toolNameByToolCallId.get(chunk.toolCallId);
-                    const isProgressTool =
-                      toolName === DefaultToolName.Progress;
-                    const isOutlineOrPlanTool =
-                      toolName === DefaultToolName.Outline ||
-                      toolName === DefaultToolName.Plan;
-                    if (!isProgressTool && !isOutlineOrPlanTool && activePlanId) {
-                      const current = planProgressStore.get(activePlanId);
-                      const idx =
-                        stepIndexForStepOutput ?? current?.currentStepIndex;
-                      if (idx !== undefined) {
-                        const output =
-                          (chunk.type === "tool-output-available"
-                            ? chunk.output
-                            : chunk.type === "tool-output-error"
-                            ? chunk.errorText
-                            : undefined) ?? undefined;
-                        dataStream.write({
-                          type: "data-plan-step-output",
-                          id: activePlanId,
-                          data: {
-                            planId: activePlanId,
-                            stepIndex: idx,
-                            toolName,
-                            output,
-                          },
-                        });
-                      }
-                    }
-                    if (!isProgressTool && !isExplicitPlanProgress && activePlanId) {
-                      const current = planProgressStore.get(activePlanId);
-                      if (current?.currentStepIndex !== undefined) {
-                        const idx = current.currentStepIndex;
-                        const status =
-                          chunk.type === "tool-output-error"
-                            ? ("failed" as const)
-                            : ("completed" as const);
-                        current.steps[idx] = { status };
-                        const nextIndex =
-                          idx + 1 < current.steps.length ? idx + 1 : undefined;
-                        current.currentStepIndex = nextIndex;
-                        if (nextIndex !== undefined) {
-                          const nextStatus = current.steps[nextIndex]?.status;
-                          if (nextStatus === "pending") {
-                            current.steps[nextIndex] = { status: "in_progress" };
-                          }
-                        }
-                        dataStream.write({
-                          type: "data-plan-progress",
-                          id: activePlanId,
-                          data: current,
-                        });
-                      }
-                    }
+                    const isError = chunk.type === "tool-output-error";
+                    const output = isError ? chunk.errorText : chunk.output;
+                    progressTracker.handleToolOutput(
+                      chunk.toolCallId,
+                      output,
+                      isError,
+                    );
                   }
 
                   controller.enqueue(chunk);
@@ -596,9 +569,7 @@ export async function POST(request: Request) {
 
           const planOnlyResult = streamText({
             model,
-            system:
-              systemPrompt +
-              `\n\n你必须先调用 plan 工具输出完整的步骤列表，然后停止。不要在生成计划的同时执行任何步骤。在 plan 工具中，只生成 title 和 description，不要生成 actions。`,
+            system: systemPrompt + "\n\n" + PLAN_GENERATION_PROMPT,
             messages: await convertToModelMessages(messages),
             experimental_transform: smoothStream({ chunking: "word" }),
             maxRetries: 2,
@@ -633,6 +604,16 @@ export async function POST(request: Request) {
 
           if (planId && planData) {
             writePlanSnapshot(planId, planData);
+            progressTracker.setActivePlanId(planId);
+            activePlanId = planId;
+
+            // Record analytics
+            recordPlanCreated(
+              planId,
+              (planData as any).title || "Untitled Plan",
+              (planData as any).steps?.length || 0
+            );
+
             const planJson = JSON.stringify(planData);
             const { [DefaultToolName.Plan]: _planTool, ...executionTools } =
               vercelAITooles;
@@ -640,8 +621,7 @@ export async function POST(request: Request) {
             const executionResult = streamText({
               model,
               system:
-                systemPrompt +
-                `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n\n现在开始执行该计划：\n- 严格按 steps 的顺序执行（从 0 到最后）\n- 每步开始前调用 progress：{ planId:\"${planId}\", stepIndex:i, status:\"in_progress\", currentStepIndex:i }\n- 每步完成后调用 progress：{ planId:\"${planId}\", stepIndex:i, status:\"completed\", currentStepIndex:i+1 }\n- 若失败调用 status:\"failed\" 并停止继续执行\n- 不要再次调用 plan 工具，也不要改写 steps 内容，只更新进度\n`,
+                systemPrompt + "\n\n" + buildPlanExecutionPrompt(planId, planJson),
               messages: await convertToModelMessages(messages),
               experimental_transform: smoothStream({ chunking: "word" }),
               maxRetries: 2,
@@ -665,59 +645,22 @@ export async function POST(request: Request) {
               new TransformStream({
                 transform(chunk, controller) {
                   if (chunk.type === "tool-input-available") {
-                    toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
-                    if (chunk.toolName === DefaultToolName.Progress) {
-                      isExplicitPlanProgress = true;
-                      const input = chunk.input as any;
-                      if (typeof input?.currentStepIndex === "number") {
-                        stepIndexForStepOutput = input.currentStepIndex;
-                      } else if (typeof input?.stepIndex === "number") {
-                        stepIndexForStepOutput = input.stepIndex;
-                      }
-                    } else if (!isExplicitPlanProgress && activePlanId) {
-                      const current = planProgressStore.get(activePlanId);
-                      if (current?.currentStepIndex !== undefined) {
-                        const idx = current.currentStepIndex;
-                        if (current.steps[idx]?.status === "pending") {
-                          current.steps[idx] = { status: "in_progress" };
-                          dataStream.write({
-                            type: "data-plan-progress",
-                            id: activePlanId,
-                            data: current,
-                          });
-                        }
-                      }
-                    }
+                    progressTracker.handleToolInput(
+                      chunk.toolCallId,
+                      chunk.toolName,
+                      chunk.input,
+                    );
                   } else if (
                     chunk.type === "tool-output-available" ||
                     chunk.type === "tool-output-error"
                   ) {
-                    const toolName = toolNameByToolCallId.get(chunk.toolCallId);
-                    const isProgressTool =
-                      toolName === DefaultToolName.Progress;
-                    if (!isProgressTool && activePlanId) {
-                      const current = planProgressStore.get(activePlanId);
-                      const idx =
-                        stepIndexForStepOutput ?? current?.currentStepIndex;
-                      if (idx !== undefined) {
-                        const output =
-                          (chunk.type === "tool-output-available"
-                            ? chunk.output
-                            : chunk.type === "tool-output-error"
-                            ? chunk.errorText
-                            : undefined) ?? undefined;
-                        dataStream.write({
-                          type: "data-plan-step-output",
-                          id: activePlanId,
-                          data: {
-                            planId: activePlanId,
-                            stepIndex: idx,
-                            toolName,
-                            output,
-                          },
-                        });
-                      }
-                    }
+                    const isError = chunk.type === "tool-output-error";
+                    const output = isError ? chunk.errorText : chunk.output;
+                    progressTracker.handleToolOutput(
+                      chunk.toolCallId,
+                      output,
+                      isError,
+                    );
                   }
 
                   controller.enqueue(chunk);
@@ -756,94 +699,36 @@ export async function POST(request: Request) {
           new TransformStream({
             transform(chunk, controller) {
               if (chunk.type === "tool-input-available") {
-                toolNameByToolCallId.set(chunk.toolCallId, chunk.toolName);
-
                 if (chunk.toolName === DefaultToolName.Plan) {
                   const parsed = PlanToolOutputSchema.safeParse(chunk.input);
                   if (parsed.success) {
                     writePlanSnapshot(chunk.toolCallId, parsed.data);
+                    progressTracker.setActivePlanId(chunk.toolCallId);
+                    activePlanId = chunk.toolCallId;
                   }
-                } else if (chunk.toolName === DefaultToolName.Progress) {
-                  isExplicitPlanProgress = true;
-                  const input = chunk.input as UpdatePlanProgressInput;
-                  if (typeof input?.currentStepIndex === "number") {
-                    stepIndexForStepOutput = input.currentStepIndex;
-                  } else if (typeof input?.stepIndex === "number") {
-                    stepIndexForStepOutput = input.stepIndex;
-                  }
-                } else if (!isExplicitPlanProgress && activePlanId) {
-                  const current = planProgressStore.get(activePlanId);
-                  if (current?.currentStepIndex !== undefined) {
-                    const idx = current.currentStepIndex;
-                    if (current.steps[idx]?.status === "pending") {
-                      current.steps[idx] = { status: "in_progress" };
-                      dataStream.write({
-                        type: "data-plan-progress",
-                        id: activePlanId,
-                        data: current,
-                      });
-                    }
-                  }
+                }
+                
+                // Handle progress tracking for inline plans
+                if (activePlanId) {
+                  progressTracker.handleToolInput(
+                    chunk.toolCallId,
+                    chunk.toolName,
+                    chunk.input,
+                  );
                 }
               } else if (
                 chunk.type === "tool-output-available" ||
                 chunk.type === "tool-output-error"
               ) {
-                const toolName = toolNameByToolCallId.get(chunk.toolCallId);
-                const isProgressTool =
-                  toolName === DefaultToolName.Progress;
-                const isPlanTool = toolName === DefaultToolName.Plan;
-                if (!isProgressTool && !isPlanTool && activePlanId) {
-                  const current = planProgressStore.get(activePlanId);
-                  const idx = stepIndexForStepOutput ?? current?.currentStepIndex;
-                  if (idx !== undefined) {
-                    const output =
-                      (chunk.type === "tool-output-available"
-                        ? chunk.output
-                        : chunk.type === "tool-output-error"
-                        ? chunk.errorText
-                        : undefined) ?? undefined;
-                    dataStream.write({
-                      type: "data-plan-step-output",
-                      id: activePlanId,
-                      data: {
-                        planId: activePlanId,
-                        stepIndex: idx,
-                        toolName,
-                        output,
-                      },
-                    });
-                  }
-                }
-                if (
-                  !isPlanTool &&
-                  !isProgressTool &&
-                  !isExplicitPlanProgress &&
-                  activePlanId
-                ) {
-                  const current = planProgressStore.get(activePlanId);
-                  if (current?.currentStepIndex !== undefined) {
-                    const idx = current.currentStepIndex;
-                    const status =
-                      chunk.type === "tool-output-error"
-                        ? ("failed" as const)
-                        : ("completed" as const);
-                    current.steps[idx] = { status };
-                    const nextIndex =
-                      idx + 1 < current.steps.length ? idx + 1 : undefined;
-                    current.currentStepIndex = nextIndex;
-                    if (nextIndex !== undefined) {
-                      const nextStatus = current.steps[nextIndex]?.status;
-                      if (nextStatus === "pending") {
-                        current.steps[nextIndex] = { status: "in_progress" };
-                      }
-                    }
-                    dataStream.write({
-                      type: "data-plan-progress",
-                      id: activePlanId,
-                      data: current,
-                    });
-                  }
+                // Handle progress tracking for inline plans
+                if (activePlanId) {
+                  const isError = chunk.type === "tool-output-error";
+                  const output = isError ? chunk.errorText : chunk.output;
+                  progressTracker.handleToolOutput(
+                    chunk.toolCallId,
+                    output,
+                    isError,
+                  );
                 }
               }
 

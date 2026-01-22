@@ -4,7 +4,7 @@ import { createLineChartTool } from "./visualization/create-line-chart";
 import { createTableTool } from "./visualization/create-table";
 import { planTool } from "./planning/plan";
 import { outlineTool } from "./planning/outline";
-import { updatePlanProgressTool } from "./planning/update-plan-progress";
+import { progressTool } from "./planning/progress";
 import { exaSearchTool, exaContentsTool } from "./web/web-search";
 import { AppDefaultToolkit, DefaultToolName } from ".";
 import { Tool } from "ai";
@@ -23,7 +23,7 @@ export const APP_DEFAULT_TOOL_KIT: Record<
     [DefaultToolName.CreateTable]: createTableTool,
     [DefaultToolName.Outline]: outlineTool,
     [DefaultToolName.Plan]: planTool,
-    [DefaultToolName.Progress]: updatePlanProgressTool,
+    [DefaultToolName.Progress]: progressTool,
   },
   [AppDefaultToolkit.WebSearch]: {
     [DefaultToolName.WebSearch]: exaSearchTool,

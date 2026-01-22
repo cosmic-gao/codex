@@ -1,7 +1,7 @@
 import { tool as createTool } from "ai";
 import { z } from "zod";
 
-export const UpdatePlanProgressInputSchema = z.object({
+export const ProgressInputSchema = z.object({
   planId: z
     .string()
     .describe(
@@ -34,12 +34,12 @@ export const UpdatePlanProgressInputSchema = z.object({
     .describe("Optionally set the current executing step index (0-based)."),
 });
 
-export type UpdatePlanProgressInput = z.infer<typeof UpdatePlanProgressInputSchema>;
+export type ProgressInput = z.infer<typeof ProgressInputSchema>;
 
-export const updatePlanProgressTool = createTool({
+export const progressTool = createTool({
   description:
     "Update the execution progress of a previously generated plan. Use this to mark steps as in progress, completed, or failed.",
-  inputSchema: UpdatePlanProgressInputSchema,
+  inputSchema: ProgressInputSchema,
   execute: async () => {
     return "Success";
   },
