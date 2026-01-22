@@ -210,9 +210,18 @@ export class PlanProgressTracker {
       recordStepFailed(this.activePlanId, stepIndex, errorMessage || "Unknown error");
     }
 
-    // Update current step index if provided
+    // Update current step index
+    // If newCurrentStepIndex is explicitly provided, use it
+    // If it's undefined and this is a completed step, check if it's the last step
     if (newCurrentStepIndex !== undefined) {
       current.currentStepIndex = newCurrentStepIndex;
+    } else if (status === "completed") {
+      // For the last step, currentStepIndex might be omitted
+      // Check if this is indeed the last step
+      const isLastStep = stepIndex === current.steps.length - 1;
+      if (isLastStep) {
+        current.currentStepIndex = undefined; // Mark as complete
+      }
     }
 
     // Check if plan is complete
@@ -228,6 +237,7 @@ export class PlanProgressTracker {
         recordPlanCompleted(this.activePlanId);
       }
       this.activeStepIndex = undefined;
+      current.currentStepIndex = undefined; // Ensure it's marked as complete
     }
 
     // Write progress update

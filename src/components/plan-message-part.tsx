@@ -56,7 +56,7 @@ function toStepStatus(
 
 const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) => {
   return (
-    <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background">
+    <div className="relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-card ring-2 ring-card">
       <AnimatePresence mode="wait">
         {status === "completed" ? (
           <motion.div
@@ -66,8 +66,8 @@ const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) =>
             exit={{ scale: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-primary-foreground">
-              <CheckCircle2 className="size-4" />
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
+              <CheckCircle2 className="size-3.5" strokeWidth={2.5} />
             </div>
           </motion.div>
         ) : status === "in_progress" ? (
@@ -78,8 +78,11 @@ const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) =>
             exit={{ scale: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground">
-              <span className="text-[10px] font-bold">{index + 1}</span>
+            <div className="relative flex h-6 w-6 items-center justify-center">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/20 opacity-75"></span>
+              <div className="relative flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm">
+                <span className="text-[10px] font-bold">{index + 1}</span>
+              </div>
             </div>
           </motion.div>
         ) : status === "failed" ? (
@@ -90,8 +93,8 @@ const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) =>
             exit={{ scale: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground">
-              <XCircle className="size-4" />
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm">
+              <XCircle className="size-3.5" strokeWidth={2.5} />
             </div>
           </motion.div>
         ) : (
@@ -101,7 +104,7 @@ const StatusIcon = ({ status, index }: { status: StepStatus; index: number }) =>
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0, opacity: 0 }}
           >
-            <div className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-muted bg-background text-muted-foreground">
+            <div className="flex h-6 w-6 items-center justify-center rounded-full border border-muted-foreground/20 bg-muted/10 text-muted-foreground/70">
               <span className="text-[10px] font-medium">{index + 1}</span>
             </div>
           </motion.div>
@@ -156,6 +159,7 @@ const ProgressBar = ({
 const PlanStep = ({
   step,
   status,
+  prevStatus,
   index,
   isLast,
   actions,
@@ -165,6 +169,7 @@ const PlanStep = ({
 }: {
   step: DeepPartial<PlanToolOutput["steps"][number]> | DeepPartial<OutlineToolOutput["steps"][number]>;
   status: StepStatus;
+  prevStatus?: StepStatus;
   index: number;
   isLast: boolean;
   actions?: { label: string; value?: string }[];
@@ -215,15 +220,25 @@ const PlanStep = ({
 
   return (
     <div className={cn(
-      "group relative flex gap-4 transition-all duration-300",
-      isCurrent && "rounded-lg bg-muted/30 -mx-2 px-2 py-2"
+      "group relative flex gap-4 transition-all duration-300 rounded-lg px-2 py-2",
+      isCurrent ? "bg-muted/40" : "hover:bg-muted/10"
     )}>
-      {/* Timeline Line */}
+      {/* Upper Line (connecting to previous) */}
+      {index > 0 && (
+        <div
+          className={cn(
+            "absolute left-5 top-0 h-8 w-[1.5px] -translate-x-1/2 transition-colors duration-300",
+            prevStatus === "completed" ? "bg-primary/30" : "bg-border/60",
+          )}
+        />
+      )}
+      
+      {/* Lower Line (connecting to next) */}
       {!isLast && (
         <div
           className={cn(
-            "absolute left-3 top-8 -bottom-4 w-px -ml-px transition-colors duration-300",
-            status === "completed" ? "bg-primary/20" : "bg-border/40",
+            "absolute left-5 top-8 bottom-0 w-[1.5px] -translate-x-1/2 transition-colors duration-300",
+            status === "completed" ? "bg-primary/30" : "bg-border/60",
           )}
         />
       )}
@@ -245,7 +260,7 @@ const PlanStep = ({
                   status === "completed" && "text-foreground",
                   status === "in_progress" && "text-primary font-bold",
                   status === "failed" && "text-red-500",
-                  status === "pending" && "text-foreground/70",
+                  status === "pending" && "text-muted-foreground",
                   isCurrent && "text-primary"
                 )}
               >
@@ -526,11 +541,15 @@ function PurePlanMessagePart({
                   const outputs = stepOutputs?.[index];
                   const progressStep = progress.steps[index];
                   const isCurrent = progress.currentStepIndex === index;
+                  const prevStatus = index > 0 
+                    ? toStepStatus(progress.steps[index - 1]?.status ?? "pending") 
+                    : undefined;
                   return (
                     <PlanStep
                       key={index}
                       step={step}
                       status={status}
+                      prevStatus={prevStatus}
                       index={index}
                       isLast={index === steps.length - 1}
                       actions={actions}

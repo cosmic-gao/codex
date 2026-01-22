@@ -99,13 +99,44 @@ const PurePreviewMessage = ({
   sendMessage,
 }: Props) => {
   const isUserMessage = useMemo(() => message.role === "user", [message.role]);
-  const partsForDisplay = useMemo(
-    () =>
-      message.parts.filter(
-        (part) => !(isIngestionPreviewTextPart(part) && Boolean(part.ingestionPreview)),
-      ),
-    [message.parts],
-  );
+  const partsForDisplay = useMemo(() => {
+    const parts = message.parts.filter(
+      (part) =>
+        !(isIngestionPreviewTextPart(part) && Boolean(part.ingestionPreview)),
+    );
+
+    const seenPlanIds = new Set<string>();
+
+    return parts.filter((part) => {
+      const parsedOutlinePart = OutlineDataPartSchema.safeParse(part);
+      if (parsedOutlinePart.success) {
+        const outlineId =
+          parsedOutlinePart.data.id ??
+          (typeof parsedOutlinePart.data.data.title === "string"
+            ? `${message.id}:${parsedOutlinePart.data.data.title}`
+            : message.id);
+
+        if (seenPlanIds.has(outlineId)) return false;
+        seenPlanIds.add(outlineId);
+        return true;
+      }
+
+      const parsedPlanPart = PlanDataPartSchema.safeParse(part);
+      if (parsedPlanPart.success) {
+        const planId =
+          parsedPlanPart.data.id ??
+          (typeof parsedPlanPart.data.data.title === "string"
+            ? `${message.id}:${parsedPlanPart.data.data.title}`
+            : message.id);
+
+        if (seenPlanIds.has(planId)) return false;
+        seenPlanIds.add(planId);
+        return true;
+      }
+
+      return true;
+    });
+  }, [message.parts, message.id]);
   const hasDataPlan = useMemo(
     () => partsForDisplay.some((p) => p.type === "data-plan"),
     [partsForDisplay],

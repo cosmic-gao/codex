@@ -93,34 +93,105 @@ Execute the plan step-by-step. The user is watching real-time progress.
 ${outlineJson}
 </outline>
 
-## Execution Protocol
-Execute ONE step at a time. Follow this cycle EXACTLY:
+## MANDATORY EXECUTION PROTOCOL
 
-1. **Start**: Call \`progress({ planId: "${outlineId}", stepIndex: N, status: "in_progress", currentStepIndex: N })\`
-2. **Work**: Perform the task (output content, call tools).
-3. **Finish**: Call \`progress({ planId: "${outlineId}", stepIndex: N, status: "completed", currentStepIndex: N + 1 })\`
+You MUST execute steps ONE AT A TIME in this exact sequence:
 
-## Critical Rules
-- **Sequential**: Finish Step N fully BEFORE starting Step N+1.
-- **One by One**: NEVER start multiple steps at once.
-- **Mandatory Progress**: Call \`progress\` at start and end of EACH step.
-- **Real-time Output**: Output content/tool calls between progress updates.
-- **Failures**: If a step fails, call \`progress({ ..., status: "failed", actions: [{ label: "error", value: "reason" }] })\` and STOP.
+### For EACH Step (0, 1, 2, ...):
 
-## Example Flow
+**Step N Cycle:**
 \`\`\`
-[STEP 0]
-→ progress(..., status: "in_progress", ...)
-[...Work/Output...]
-→ progress(..., status: "completed", ...)
-
-[STEP 1]
-→ progress(..., status: "in_progress", ...)
-[...Work/Output...]
-→ progress(..., status: "completed", ...)
+1. progress({ planId: "${outlineId}", stepIndex: N, status: "in_progress", currentStepIndex: N })
+2. [PERFORM THE ACTUAL WORK - output content or call tools]
+3. progress({ planId: "${outlineId}", stepIndex: N, status: "completed", currentStepIndex: N+1 })
 \`\`\`
 
-Begin with Step 0 now.
+**CRITICAL**: Complete the ENTIRE cycle for Step N before starting Step N+1.
+
+### Concrete Example (3 steps):
+
+\`\`\`
+STEP 0:
+→ progress({ planId: "${outlineId}", stepIndex: 0, status: "in_progress", currentStepIndex: 0 })
+→ [Output world building content here - the actual work]
+→ progress({ planId: "${outlineId}", stepIndex: 0, status: "completed", currentStepIndex: 1 })
+
+STEP 1:
+→ progress({ planId: "${outlineId}", stepIndex: 1, status: "in_progress", currentStepIndex: 1 })
+→ [Output character design content here - the actual work]
+→ progress({ planId: "${outlineId}", stepIndex: 1, status: "completed", currentStepIndex: 2 })
+
+STEP 2 (LAST):
+→ progress({ planId: "${outlineId}", stepIndex: 2, status: "in_progress", currentStepIndex: 2 })
+→ [Output plot outline content here - the actual work]
+→ progress({ planId: "${outlineId}", stepIndex: 2, status: "completed" })
+   ⚠️ NOTE: For the LAST step, omit currentStepIndex or set it to undefined
+\`\`\`
+
+## ABSOLUTE RULES (NON-NEGOTIABLE)
+
+### ✅ YOU MUST:
+1. Use EXACT planId: \`"${outlineId}"\` (never modify)
+2. Execute steps in strict order: 0 → 1 → 2 → ...
+3. Call \`progress\` TWICE per step (start + end)
+4. Output actual content BETWEEN the two progress calls
+5. Wait for step N to be marked "completed" before starting step N+1
+6. For the LAST step only: omit \`currentStepIndex\` in the completed call
+
+### ❌ YOU MUST NOT:
+1. Skip any \`progress\` calls
+2. Start step N+1 before completing step N
+3. Output all content at once without progress calls
+4. Call \`outline\` or \`plan\` tools again
+5. Modify the outline structure
+6. Execute multiple steps simultaneously
+
+## Common Mistakes (AVOID THESE)
+
+### ❌ WRONG: Missing progress calls
+\`\`\`
+[Output step 0]
+[Output step 1]
+[Output step 2]
+\`\`\`
+
+### ❌ WRONG: All at once
+\`\`\`
+progress(step 0, in_progress)
+progress(step 1, in_progress)
+progress(step 2, in_progress)
+[Output everything]
+\`\`\`
+
+### ✅ CORRECT: One by one
+\`\`\`
+progress(step 0, in_progress)
+[Output step 0]
+progress(step 0, completed)
+progress(step 1, in_progress)
+[Output step 1]
+progress(step 1, completed)
+...
+\`\`\`
+
+## Why This Matters
+
+The user sees REAL-TIME UI updates:
+- 🔵 Blue highlight = step is in_progress
+- 📝 Content appears = you output the work
+- ✅ Green checkmark = step is completed
+
+If you skip progress calls, the UI breaks and confuses the user.
+
+## START NOW
+
+Begin with Step 0:
+1. Call: \`progress({ planId: "${outlineId}", stepIndex: 0, status: "in_progress", currentStepIndex: 0 })\`
+2. Output the content for Step 0
+3. Call: \`progress({ planId: "${outlineId}", stepIndex: 0, status: "completed", currentStepIndex: 1 })\`
+4. Then proceed to Step 1
+
+DO NOT START STEP 1 UNTIL STEP 0 IS COMPLETED.
 `.trim();
 }
 
@@ -164,19 +235,56 @@ export function buildPlanExecutionPrompt(
 ${planJson}
 </plan>
 
-## Protocol
-Execute ONE step at a time.
-1. **Start**: \`progress({ planId: "${planId}", stepIndex: N, status: "in_progress", currentStepIndex: N })\`
-2. **Work**: Do the task.
-3. **Finish**: \`progress({ planId: "${planId}", stepIndex: N, status: "completed", currentStepIndex: N + 1 })\`
+## MANDATORY EXECUTION PROTOCOL
 
-## Rules
-- Finish Step N fully before starting Step N+1.
-- Mandatory progress calls before/after each step.
-- No parallel execution.
-- If failed: \`progress({ ..., status: "failed" })\` and STOP.
+Execute ONE step at a time in this exact sequence:
 
-Start with Step 0.
+### For EACH Step:
+\`\`\`
+1. progress({ planId: "${planId}", stepIndex: N, status: "in_progress", currentStepIndex: N })
+2. [DO THE ACTUAL WORK]
+3. progress({ planId: "${planId}", stepIndex: N, status: "completed", currentStepIndex: N+1 })
+\`\`\`
+
+### Example (3 steps):
+\`\`\`
+STEP 0:
+→ progress({ planId: "${planId}", stepIndex: 0, status: "in_progress", currentStepIndex: 0 })
+→ [Work for step 0]
+→ progress({ planId: "${planId}", stepIndex: 0, status: "completed", currentStepIndex: 1 })
+
+STEP 1:
+→ progress({ planId: "${planId}", stepIndex: 1, status: "in_progress", currentStepIndex: 1 })
+→ [Work for step 1]
+→ progress({ planId: "${planId}", stepIndex: 1, status: "completed", currentStepIndex: 2 })
+
+STEP 2 (LAST):
+→ progress({ planId: "${planId}", stepIndex: 2, status: "in_progress", currentStepIndex: 2 })
+→ [Work for step 2]
+→ progress({ planId: "${planId}", stepIndex: 2, status: "completed" })
+   ⚠️ For LAST step: omit currentStepIndex
+\`\`\`
+
+## RULES (NON-NEGOTIABLE)
+
+✅ MUST:
+- Use exact planId: \`"${planId}"\`
+- Call \`progress\` before AND after each step
+- Complete step N before starting step N+1
+- For last step: omit \`currentStepIndex\` in completed call
+
+❌ MUST NOT:
+- Skip \`progress\` calls
+- Start multiple steps at once
+- Call \`plan\` tool again
+
+## On Failure:
+\`\`\`
+progress({ planId: "${planId}", stepIndex: N, status: "failed", actions: [{ label: "error", value: "reason" }] })
+\`\`\`
+Then STOP.
+
+Start with Step 0 now.
 `.trim();
 }
 
