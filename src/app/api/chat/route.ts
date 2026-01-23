@@ -262,7 +262,10 @@ export async function POST(request: Request) {
         };
 
         const ABORT_ERROR_MESSAGE = "aborted";
-        type StepRunResult = "completed" | "aborted" | "failed";
+        type StepRunResult = {
+          status: "completed" | "aborted" | "failed";
+          output?: string;
+        };
 
         const isAborted = (): boolean =>
           request.signal.aborted;
@@ -283,26 +286,60 @@ export async function POST(request: Request) {
           const current = planProgressStore.get(stepUpdate.planId);
           if (!current) return;
 
+          // Ensure steps array is large enough with proper initialization
           while (current.steps.length <= stepUpdate.stepIndex) {
-            current.steps.push({ status: "pending" });
+            current.steps.push({
+              status: "pending",
+              actions: undefined,
+              startTime: undefined,
+              endTime: undefined,
+              toolCalls: undefined,
+              errorMessage: undefined,
+            });
           }
 
-          const prev = current.steps[stepUpdate.stepIndex] ?? { status: "pending" };
+          const prev = current.steps[stepUpdate.stepIndex] ?? {
+            status: "pending" as const,
+            actions: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            toolCalls: undefined,
+            errorMessage: undefined,
+          };
           const now = Date.now();
 
           if (stepUpdate.status === "in_progress") {
+            // Clear any other in-progress steps and reset their timing
             for (let index = 0; index < current.steps.length; index += 1) {
               if (index === stepUpdate.stepIndex) continue;
               const step = current.steps[index];
               if (!step) continue;
               if (step.status !== "in_progress") continue;
+              // Only reset steps that are actually in-progress (not completed/failed)
+              logger.warn(`[Plan] Clearing stale in-progress step ${index} when starting step ${stepUpdate.stepIndex}`);
               current.steps[index] = {
+                ...step,
                 status: "pending",
+                startTime: undefined,
+                endTime: undefined,
               };
             }
+            
+            // Determine start time: use previous step's endTime if available, otherwise current time
+            let startTime = now;
+            if (stepUpdate.stepIndex > 0) {
+              const prevStep = current.steps[stepUpdate.stepIndex - 1];
+              if (prevStep?.endTime) {
+                startTime = prevStep.endTime;
+                logger.info(`[Plan] Step ${stepUpdate.stepIndex} inheriting endTime from previous step: ${startTime}`);
+              }
+            }
+            
             current.steps[stepUpdate.stepIndex] = {
+              ...prev,
               status: "in_progress",
-              startTime: now,
+              startTime,
+              endTime: undefined,
             };
             current.currentStepIndex = stepUpdate.stepIndex;
           } else if (stepUpdate.status === "completed") {
@@ -328,6 +365,11 @@ export async function POST(request: Request) {
           }
 
           planProgressStore.set(stepUpdate.planId, current);
+          
+          // Debug logging
+          logger.info(`[Plan] writeStepStatus: planId=${stepUpdate.planId}, stepIndex=${stepUpdate.stepIndex}, status=${stepUpdate.status}`);
+          logger.info(`[Plan] Step state: startTime=${current.steps[stepUpdate.stepIndex]?.startTime}, endTime=${current.steps[stepUpdate.stepIndex]?.endTime}, currentStepIndex=${current.currentStepIndex}`);
+          
           dataStream.write({
             type: "data-plan-progress",
             id: stepUpdate.planId,
@@ -360,10 +402,13 @@ export async function POST(request: Request) {
           planId: string;
           stepIndex: number;
           emitText: boolean;
+          messages: UIMessage[];
         }): Promise<StepRunResult> => {
           const stepAbort = createAbortController();
           const isStepAborted = (): boolean => stepAbort.signal.aborted || isAborted();
 
+          // Mark step as in progress
+          logger.info(`[Plan] Starting step ${stepRun.stepIndex} for plan ${stepRun.planId}`);
           writeStepStatus({
             planId: stepRun.planId,
             stepIndex: stepRun.stepIndex,
@@ -373,7 +418,7 @@ export async function POST(request: Request) {
           const result = streamText({
             model,
             system: stepRun.system,
-            messages: await convertToModelMessages(messages),
+            messages: await convertToModelMessages(stepRun.messages),
             experimental_transform: smoothStream({ chunking: "word" }),
             maxRetries: 2,
             tools: stepRun.tools,
@@ -438,7 +483,7 @@ export async function POST(request: Request) {
                     status: "failed",
                     errorMessage: String(output),
                   });
-                  return "failed";
+                  return { status: "failed" };
                 }
               }
 
@@ -463,13 +508,14 @@ export async function POST(request: Request) {
           }
 
           if (isStepAborted()) {
+            logger.info(`[Plan] Step ${stepRun.stepIndex} aborted for plan ${stepRun.planId}`);
             writeStepStatus({
               planId: stepRun.planId,
               stepIndex: stepRun.stepIndex,
               status: "failed",
               errorMessage: ABORT_ERROR_MESSAGE,
             });
-            return "aborted";
+            return { status: "aborted" };
           }
 
           const text = textBufferParts.join("").trim();
@@ -477,12 +523,13 @@ export async function POST(request: Request) {
             writeStepOutput({ toolName: "assistant", output: text });
           }
 
+          logger.info(`[Plan] Step ${stepRun.stepIndex} completed for plan ${stepRun.planId}`);
           writeStepStatus({
             planId: stepRun.planId,
             stepIndex: stepRun.stepIndex,
             status: "completed",
           });
-          return "completed";
+          return { status: "completed", output: text };
         };
 
         const mcpClients = await mcpClientsManager.getClients();
@@ -633,6 +680,11 @@ export async function POST(request: Request) {
           activePlanId = outlineId;
           const steps = (outline.steps ?? []).map(() => ({
             status: "pending" as const,
+            actions: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            toolCalls: undefined,
+            errorMessage: undefined,
           }));
           const snapshot = {
             planId: outlineId,
@@ -658,6 +710,11 @@ export async function POST(request: Request) {
           activePlanId = planId;
           const steps = (plan.steps ?? []).map(() => ({
             status: "pending" as const,
+            actions: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            toolCalls: undefined,
+            errorMessage: undefined,
           }));
           const snapshot = {
             planId,
@@ -750,8 +807,17 @@ export async function POST(request: Request) {
             const outlineSteps = Array.isArray((outlineData as any).steps)
               ? ((outlineData as any).steps as any[])
               : [];
+            
+            logger.info(`[Plan] Executing outline ${outlineId} with ${outlineSteps.length} steps`);
+            
+            // Create a mutable copy of messages for step execution
+            const stepMessages = [...messages];
+            
             for (let i = 0; i < outlineSteps.length; i += 1) {
-              if (request.signal.aborted) return;
+              if (request.signal.aborted) {
+                logger.info(`[Plan] Outline execution aborted at step ${i}`);
+                return;
+              }
               const step = outlineSteps[i] ?? {};
               const title =
                 typeof step.title === "string" && step.title.length > 0
@@ -760,23 +826,28 @@ export async function POST(request: Request) {
               const description =
                 typeof step.description === "string" ? step.description : "";
               const isLast = i === outlineSteps.length - 1;
+              
+              logger.info(`[Plan] Preparing step ${i}: "${title}"`);
+              
               const system = [
                 systemPrompt,
                 `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n`,
-                `You are a step-execution middleware. Execute ONLY step ${i}.\n`,
-                `Step title: ${title}\n`,
-                description.length > 0 ? `Step description: ${description}\n` : "",
-                "Rules:\n",
-                "- Your output MUST correspond strictly to this step only.\n",
-                "- Do not include work from other steps, even if it seems helpful.\n",
-                "- Do not reference future steps or start the next step.\n",
-                "- Do not revise the plan.\n",
-                "- If the step requests a specific artifact (file, snippet, payload), output only that artifact.\n",
-                "- Do not call outline/plan/progress tools.\n",
-                isLast
-                  ? "- This is the final step. Produce the final deliverable in full.\n"
-                  : "- This is not the final step. Produce only the artifact for this step.\n",
-                "- Stop when the step output is complete.\n",
+                `\n## STEP EXECUTION MODE - STRICT SINGLE-STEP EXECUTION\n`,
+                `Current Task: Execute ONLY Step ${i}\n`,
+                `Step Title: ${title}\n`,
+                description.length > 0 ? `Step Description: ${description}\n` : "",
+                `\n### ⚠️ EXECUTION CONSTRAINTS (MUST FOLLOW)\n`,
+                `1. [SCOPE] Execute ONLY the content of Step ${i}. Do NOT exceed this step's boundaries.\n`,
+                `2. [BOUNDARY] Do NOT output, mention, or prepare for subsequent steps (Step ${i + 1} onwards).\n`,
+                `3. [TOOLS] Do NOT call outline/plan/progress tools. Progress is managed automatically by the system.\n`,
+                `4. [FOCUS] Stop immediately after completing the specific work required for this step.\n`,
+                `5. [OUTPUT] ${isLast ? "This is the FINAL step. Output the complete final deliverable." : "Output ONLY the artifact for THIS step. Do not expand to other steps."}\n`,
+                `\n### 🎯 EXECUTION CHECKLIST\n`,
+                `- [ ] I am executing ONLY Step ${i}'s work\n`,
+                `- [ ] I am NOT mentioning Step ${i + 1} or later content\n`,
+                `- [ ] I am NOT calling progress/outline/plan tools\n`,
+                `- [ ] I will stop immediately after completion and wait for the system to execute the next step\n`,
+                `\n▶️ Begin executing Step ${i} NOW:\n`,
               ].join("");
               const result = await runStep({
                 system,
@@ -784,9 +855,33 @@ export async function POST(request: Request) {
                 planId: outlineId,
                 stepIndex: i,
                 emitText: isLast,
+                messages: stepMessages,
               });
-              if (result !== "completed") return;
+              
+              logger.info(`[Plan] Step ${i} result status: ${result.status}`);
+              
+              if (result.status !== "completed") {
+                logger.warn(`[Plan] Stopping execution at step ${i} due to: ${result.status}`);
+                return;
+              }
+              
+              // Append step output to messages for next step
+              if (result.output && result.output.length > 0) {
+                stepMessages.push({
+                  id: generateUUID(),
+                  role: "assistant",
+                  parts: [
+                    {
+                      type: "text",
+                      text: result.output,
+                    },
+                  ],
+                });
+                logger.info(`[Plan] Added step ${i} output to message history (${result.output.length} chars)`);
+              }
             }
+            
+            logger.info(`[Plan] Outline ${outlineId} execution completed successfully`);
             return;
           }
         } else if (isPlanMode && vercelAITooles[DefaultToolName.Plan]) {
@@ -854,8 +949,17 @@ export async function POST(request: Request) {
             const planSteps = Array.isArray((planData as any).steps)
               ? ((planData as any).steps as any[])
               : [];
+            
+            logger.info(`[Plan] Executing plan ${planId} with ${planSteps.length} steps`);
+            
+            // Create a mutable copy of messages for step execution
+            const stepMessages = [...messages];
+            
             for (let i = 0; i < planSteps.length; i += 1) {
-              if (request.signal.aborted) return;
+              if (request.signal.aborted) {
+                logger.info(`[Plan] Plan execution aborted at step ${i}`);
+                return;
+              }
               const step = planSteps[i] ?? {};
               const title =
                 typeof step.title === "string" && step.title.length > 0
@@ -864,23 +968,28 @@ export async function POST(request: Request) {
               const description =
                 typeof step.description === "string" ? step.description : "";
               const isLast = i === planSteps.length - 1;
+              
+              logger.info(`[Plan] Preparing step ${i}: "${title}"`);
+              
               const system = [
                 systemPrompt,
                 `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n`,
-                `You are a step-execution middleware. Execute ONLY step ${i}.\n`,
-                `Step title: ${title}\n`,
-                description.length > 0 ? `Step description: ${description}\n` : "",
-                "Rules:\n",
-                "- Your output MUST correspond strictly to this step only.\n",
-                "- Do not include work from other steps, even if it seems helpful.\n",
-                "- Do not reference future steps or start the next step.\n",
-                "- Do not revise the plan.\n",
-                "- If the step requests a specific artifact (file, snippet, payload), output only that artifact.\n",
-                "- Do not call outline/plan/progress tools.\n",
-                isLast
-                  ? "- This is the final step. Produce the final deliverable in full.\n"
-                  : "- This is not the final step. Produce only the artifact for this step.\n",
-                "- Stop when the step output is complete.\n",
+                `\n## STEP EXECUTION MODE - STRICT SINGLE-STEP EXECUTION\n`,
+                `Current Task: Execute ONLY Step ${i}\n`,
+                `Step Title: ${title}\n`,
+                description.length > 0 ? `Step Description: ${description}\n` : "",
+                `\n### ⚠️ EXECUTION CONSTRAINTS (MUST FOLLOW)\n`,
+                `1. [SCOPE] Execute ONLY the content of Step ${i}. Do NOT exceed this step's boundaries.\n`,
+                `2. [BOUNDARY] Do NOT output, mention, or prepare for subsequent steps (Step ${i + 1} onwards).\n`,
+                `3. [TOOLS] Do NOT call outline/plan/progress tools. Progress is managed automatically by the system.\n`,
+                `4. [FOCUS] Stop immediately after completing the specific work required for this step.\n`,
+                `5. [OUTPUT] ${isLast ? "This is the FINAL step. Output the complete final deliverable." : "Output ONLY the artifact for THIS step. Do not expand to other steps."}\n`,
+                `\n### 🎯 EXECUTION CHECKLIST\n`,
+                `- [ ] I am executing ONLY Step ${i}'s work\n`,
+                `- [ ] I am NOT mentioning Step ${i + 1} or later content\n`,
+                `- [ ] I am NOT calling progress/outline/plan tools\n`,
+                `- [ ] I will stop immediately after completion and wait for the system to execute the next step\n`,
+                `\n▶️ Begin executing Step ${i} NOW:\n`,
               ].join("");
               const result = await runStep({
                 system,
@@ -888,9 +997,33 @@ export async function POST(request: Request) {
                 planId,
                 stepIndex: i,
                 emitText: isLast,
+                messages: stepMessages,
               });
-              if (result !== "completed") return;
+              
+              logger.info(`[Plan] Step ${i} result status: ${result.status}`);
+              
+              if (result.status !== "completed") {
+                logger.warn(`[Plan] Stopping execution at step ${i} due to: ${result.status}`);
+                return;
+              }
+              
+              // Append step output to messages for next step
+              if (result.output && result.output.length > 0) {
+                stepMessages.push({
+                  id: generateUUID(),
+                  role: "assistant",
+                  parts: [
+                    {
+                      type: "text",
+                      text: result.output,
+                    },
+                  ],
+                });
+                logger.info(`[Plan] Added step ${i} output to message history (${result.output.length} chars)`);
+              }
             }
+            
+            logger.info(`[Plan] Plan ${planId} execution completed successfully`);
             return;
           }
         }

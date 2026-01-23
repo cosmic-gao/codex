@@ -39,7 +39,6 @@ export class PlanProgressTracker {
   private activePlanId?: string;
   private isExplicitMode: boolean;
   private activeStepIndex?: number;
-  private stepToolCallCount: Map<number, number>;
   private isStopped: boolean;
 
   constructor(
@@ -50,14 +49,12 @@ export class PlanProgressTracker {
     this.dataStream = dataStream;
     this.toolNameByToolCallId = new Map();
     this.isExplicitMode = false;
-    this.stepToolCallCount = new Map();
     this.isStopped = false;
   }
 
   setActivePlanId(planId: string): void {
     if (this.activePlanId && this.activePlanId !== planId) {
       this.toolNameByToolCallId.clear();
-      this.stepToolCallCount.clear();
       this.isExplicitMode = false;
       this.activeStepIndex = undefined;
     }
@@ -84,6 +81,9 @@ export class PlanProgressTracker {
 
   /**
    * Handle tool input available event
+   * 
+   * NOTE: Auto-tracking is DISABLED for plan-mode execution.
+   * Progress is managed by the backend runStep function which calls writeStepStatus.
    */
   trackInput(toolCallId: string, toolName: string, input?: unknown): void {
     // Skip if stopped
@@ -105,16 +105,23 @@ export class PlanProgressTracker {
 
     if (!this.activePlanId) return;
 
+    // Only record tool names for tracking purposes
+    // Auto-start is disabled - backend controls progress
     if (this.isExplicitMode) {
       this.recordTool(toolName);
       return;
     }
 
-    this.autoStartStep(toolName);
+    // AUTO-TRACKING DISABLED: Backend manages progress via writeStepStatus
+    // Just record the tool for reference
+    this.recordTool(toolName);
   }
 
   /**
    * Handle tool output available event
+   * 
+   * NOTE: Auto-completion is DISABLED for plan-mode execution.
+   * Progress is managed by the backend runStep function which calls writeStepStatus.
    */
   trackOutput(
     toolCallId: string,
@@ -142,11 +149,8 @@ export class PlanProgressTracker {
       this.recordStepOutput(toolName, output, isError);
     }
 
-    // Auto-complete step (only for non-progress, non-meta tools)
-    // This is the fallback mechanism when AI doesn't use progress tool
-    if (!isMetaTool && this.activePlanId && !this.isExplicitMode) {
-      this.autoCompleteStep(isError, output);
-    }
+    // AUTO-COMPLETION DISABLED: Backend manages progress via writeStepStatus
+    // The runStep function in route.ts controls when steps complete
   }
 
   /**
@@ -167,7 +171,9 @@ export class PlanProgressTracker {
     }
 
     while (current.steps.length <= stepIndex) {
-      current.steps.push({ status: "pending" });
+      current.steps.push({
+        status: "pending"
+      });
     }
 
     const step = current.steps[stepIndex];
@@ -242,149 +248,6 @@ export class PlanProgressTracker {
 
     // Write progress update
     this.writeProgress(current);
-  }
-
-  /**
-   * Auto-detect step start based on tool calls
-   * Intelligently determines which step should be started based on current state
-   */
-  private autoStartStep(toolName: string): void {
-    if (!this.activePlanId) return;
-
-    const current = this.progressStore.get(this.activePlanId);
-    if (!current) return;
-
-    // Find the next step that should be started
-    let targetStepIndex: number | undefined;
-
-    // First, check if there's already an in-progress step
-    const inProgressIndex = current.steps.findIndex(s => s.status === "in_progress");
-    
-    if (inProgressIndex !== -1) {
-      // Continue with the current in-progress step
-      targetStepIndex = inProgressIndex;
-    } else {
-      // Find the first pending step
-      const nextPendingIndex = current.steps.findIndex(s => s.status === "pending");
-      
-      if (nextPendingIndex !== -1) {
-        // Start the next pending step
-        targetStepIndex = nextPendingIndex;
-      }
-    }
-
-    if (targetStepIndex === undefined) return;
-
-    const step = current.steps[targetStepIndex];
-    if (!step) return;
-
-    if (step.status === "pending") {
-      // Mark step as in progress
-      current.steps[targetStepIndex] = {
-        ...step,
-        status: "in_progress",
-        startTime: Date.now(),
-        toolCalls: [toolName],
-      };
-
-      this.stepToolCallCount.set(targetStepIndex, 1);
-      
-      // Update currentStepIndex to match
-      current.currentStepIndex = targetStepIndex;
-
-      this.writeProgress(current);
-    } else if (step.status === "in_progress") {
-      // Track additional tool calls for the current step
-      const count = this.stepToolCallCount.get(targetStepIndex) ?? 0;
-      this.stepToolCallCount.set(targetStepIndex, count + 1);
-
-      if (step.toolCalls) {
-        step.toolCalls.push(toolName);
-      }
-    }
-  }
-
-  /**
-   * Auto-complete step based on tool output
-   */
-  private autoCompleteStep(isError: boolean, output?: unknown): void {
-    if (!this.activePlanId) return;
-
-    const current = this.progressStore.get(this.activePlanId);
-    if (!current) return;
-
-    // Find the current in-progress step
-    const idx = current.steps.findIndex(s => s.status === "in_progress");
-    
-    if (idx === -1) return; // No in-progress step to complete
-
-    const step = current.steps[idx];
-    if (!step) return;
-
-    // Determine if step should be completed
-    const shouldComplete = this.shouldCompleteStep(idx, isError);
-
-    if (shouldComplete) {
-      const status = isError ? "failed" : "completed";
-      const endTime = Date.now();
-
-      current.steps[idx] = {
-        ...step,
-        status,
-        endTime,
-        errorMessage: isError ? String(output) : undefined,
-      };
-
-      // Record analytics
-      if (isError) {
-        recordStepFailed(this.activePlanId, idx, String(output));
-      } else {
-        const toolName = step.toolCalls?.[0];
-        recordStepCompleted(this.activePlanId, idx, toolName);
-      }
-
-      // Check if plan is complete
-      const allStepsComplete = current.steps.every(
-        (s) => s.status === "completed" || s.status === "failed"
-      );
-
-      if (allStepsComplete) {
-        const hasFailures = current.steps.some((s) => s.status === "failed");
-        if (hasFailures) {
-          recordPlanFailed(this.activePlanId);
-        } else {
-          recordPlanCompleted(this.activePlanId);
-        }
-        console.log(`[PlanProgressTracker] Plan completed. Has failures: ${hasFailures}`);
-      }
-
-      // Update currentStepIndex for next step
-      if (!isError) {
-        const nextIndex = idx + 1 < current.steps.length ? idx + 1 : undefined;
-        current.currentStepIndex = nextIndex;
-        
-        // Don't pre-mark next step - let autoStartStep handle it on next tool call
-      } else {
-        // Stop execution on failure
-        current.currentStepIndex = undefined;
-      }
-
-      this.stepToolCallCount.delete(idx);
-      this.writeProgress(current);
-    }
-  }
-
-  /**
-   * Determine if step should be completed
-   */
-  private shouldCompleteStep(stepIndex: number, isError: boolean): boolean {
-    if (isError) return true; // Always complete on error
-
-    const toolCallCount = this.stepToolCallCount.get(stepIndex) ?? 0;
-
-    // Simple heuristic: complete if at least one tool call succeeded
-    // In the future, could use complexity score to determine threshold
-    return toolCallCount >= 1;
   }
 
   /**
