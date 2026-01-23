@@ -46,6 +46,14 @@ Call the \`outline\` tool with your plan, then STOP. Do NOT execute any steps.
 3. **Dependencies**: Explicitly mark prerequisites.
 4. **Verbs**: Start titles with action verbs (e.g., Analyze, Create, Build).
 5. **No Ambiguity**: Avoid vague terms like "process" or "handle".
+6. **Verifiable**: Each step must have a clear, distinct output artifact.
+
+## ⚠️ IMPORTANT: Plan Creation Phase Only
+- You are ONLY creating the plan structure
+- You will NOT execute any steps
+- The system will automatically execute each step sequentially
+- Step progress will be tracked automatically by the system
+- Do NOT include status management or progress updates in your plan
 
 ## Example
 \`\`\`json
@@ -97,6 +105,17 @@ Create a structured execution plan. Call \`plan\` tool, then STOP.
 2. **Sequential**: Steps must follow a logical execution order.
 3. **Actionable**: Titles must be clear actions.
 4. **Complete**: The plan must cover the entire user request.
+5. **Verifiable**: Steps must produce visible results.
+
+## ⚠️ IMPORTANT: Plan Creation Phase Only
+- You are ONLY creating the plan structure
+- You will NOT execute any steps yourself
+- After you call \`plan\`, the system will automatically:
+  1. Execute each step one by one
+  2. Track progress and status for each step
+  3. Handle transitions between steps
+- Do NOT include status management or progress tracking in your plan
+- Do NOT describe how to update status in step descriptions
 
 ## Example
 \`\`\`json

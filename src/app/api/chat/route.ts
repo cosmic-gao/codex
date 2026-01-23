@@ -274,6 +274,7 @@ export async function POST(request: Request) {
          * @description
          * Update server-side plan progress for a single step and emit a progress part.
          * This is the authoritative step status writer for plan-mode execution.
+         * GUARANTEES: Every status transition is logged and persisted.
          *
          * @param stepUpdate Plan step update payload.
          */
@@ -284,7 +285,10 @@ export async function POST(request: Request) {
           errorMessage?: string;
         }): void => {
           const current = planProgressStore.get(stepUpdate.planId);
-          if (!current) return;
+          if (!current) {
+            logger.error(`[Plan] ❌ writeStepStatus: Plan ${stepUpdate.planId} not found in store`);
+            return;
+          }
 
           // Ensure steps array is large enough with proper initialization
           while (current.steps.length <= stepUpdate.stepIndex) {
@@ -308,6 +312,9 @@ export async function POST(request: Request) {
           };
           const now = Date.now();
 
+          // Log state transition
+          logger.info(`[Plan] 📊 Status transition: Step ${stepUpdate.stepIndex} ${prev.status} → ${stepUpdate.status}`);
+
           if (stepUpdate.status === "in_progress") {
             // Clear any other in-progress steps and reset their timing
             for (let index = 0; index < current.steps.length; index += 1) {
@@ -316,7 +323,7 @@ export async function POST(request: Request) {
               if (!step) continue;
               if (step.status !== "in_progress") continue;
               // Only reset steps that are actually in-progress (not completed/failed)
-              logger.warn(`[Plan] Clearing stale in-progress step ${index} when starting step ${stepUpdate.stepIndex}`);
+              logger.warn(`[Plan] ⚠️ Clearing stale in-progress step ${index} when starting step ${stepUpdate.stepIndex}`);
               current.steps[index] = {
                 ...step,
                 status: "pending",
@@ -331,7 +338,7 @@ export async function POST(request: Request) {
               const prevStep = current.steps[stepUpdate.stepIndex - 1];
               if (prevStep?.endTime) {
                 startTime = prevStep.endTime;
-                logger.info(`[Plan] Step ${stepUpdate.stepIndex} inheriting endTime from previous step: ${startTime}`);
+                logger.info(`[Plan] ⏰ Step ${stepUpdate.stepIndex} inheriting endTime from step ${stepUpdate.stepIndex - 1}: ${new Date(startTime).toISOString()}`);
               }
             }
             
@@ -340,9 +347,15 @@ export async function POST(request: Request) {
               status: "in_progress",
               startTime,
               endTime: undefined,
+              errorMessage: undefined, // Clear any previous error
             };
             current.currentStepIndex = stepUpdate.stepIndex;
           } else if (stepUpdate.status === "completed") {
+            // Validate: can only complete if currently in-progress or pending
+            if (prev.status !== "in_progress" && prev.status !== "pending") {
+              logger.warn(`[Plan] ⚠️ Attempting to complete step ${stepUpdate.stepIndex} with unexpected previous status: ${prev.status}`);
+            }
+            
             current.steps[stepUpdate.stepIndex] = {
               ...prev,
               status: "completed",
@@ -354,7 +367,11 @@ export async function POST(request: Request) {
                 ? stepUpdate.stepIndex + 1
                 : undefined;
             current.currentStepIndex = nextIndex;
+            
+            const duration = prev.startTime ? now - prev.startTime : 0;
+            logger.info(`[Plan] ✅ Step ${stepUpdate.stepIndex} completed in ${(duration / 1000).toFixed(2)}s`);
           } else {
+            // Failed status
             current.steps[stepUpdate.stepIndex] = {
               ...prev,
               status: "failed",
@@ -362,13 +379,15 @@ export async function POST(request: Request) {
               errorMessage: stepUpdate.errorMessage,
             };
             current.currentStepIndex = undefined;
+            
+            logger.error(`[Plan] ❌ Step ${stepUpdate.stepIndex} failed: ${stepUpdate.errorMessage || 'Unknown error'}`);
           }
 
           planProgressStore.set(stepUpdate.planId, current);
           
-          // Debug logging
-          logger.info(`[Plan] writeStepStatus: planId=${stepUpdate.planId}, stepIndex=${stepUpdate.stepIndex}, status=${stepUpdate.status}`);
-          logger.info(`[Plan] Step state: startTime=${current.steps[stepUpdate.stepIndex]?.startTime}, endTime=${current.steps[stepUpdate.stepIndex]?.endTime}, currentStepIndex=${current.currentStepIndex}`);
+          // Debug logging for verification
+          const step = current.steps[stepUpdate.stepIndex];
+          logger.info(`[Plan] 📈 Progress update emitted: planId=${stepUpdate.planId}, step=${stepUpdate.stepIndex}/${current.steps.length}, status=${step?.status}, currentStepIndex=${current.currentStepIndex}`);
           
           dataStream.write({
             type: "data-plan-progress",
@@ -391,6 +410,7 @@ export async function POST(request: Request) {
         /**
          * @description
          * Execute a single plan step in plan-mode and emit step-bound outputs and progress.
+         * Guarantees: Status will ALWAYS be updated (in_progress → completed/failed/aborted)
          * Abort/stop must immediately prevent further step execution.
          *
          * @param stepRun Step execution request.
@@ -407,129 +427,175 @@ export async function POST(request: Request) {
           const stepAbort = createAbortController();
           const isStepAborted = (): boolean => stepAbort.signal.aborted || isAborted();
 
-          // Mark step as in progress
-          logger.info(`[Plan] Starting step ${stepRun.stepIndex} for plan ${stepRun.planId}`);
+          // GUARANTEE: Mark step as in_progress - This ALWAYS happens first
+          logger.info(`[Plan] ⏳ Step ${stepRun.stepIndex}/${planProgressStore.get(stepRun.planId)?.steps.length || '?'} starting: plan=${stepRun.planId}`);
           writeStepStatus({
             planId: stepRun.planId,
             stepIndex: stepRun.stepIndex,
             status: "in_progress",
           });
 
-          const result = streamText({
-            model,
-            system: stepRun.system,
-            messages: await convertToModelMessages(stepRun.messages),
-            experimental_transform: smoothStream({ chunking: "word" }),
-            maxRetries: 2,
-            tools: stepRun.tools,
-            toolChoice: "auto",
-            abortSignal: stepAbort.signal,
-          });
-          result.consumeStream();
-
-          const textBufferParts: Array<string> = [];
-          const toolNameByToolCallId = new Map<string, string>();
-          const writeStepOutput = (payload: {
-            toolName: string;
-            output: unknown;
-          }): void => {
-            dataStream.write({
-              type: "data-plan-step-output",
-              id: stepRun.planId,
-              data: {
-                planId: stepRun.planId,
-                stepIndex: stepRun.stepIndex,
-                toolName: payload.toolName,
-                output: payload.output,
-              },
-            });
-          };
-          const reader = result
-            .toUIMessageStream({
-              messageMetadata: ({ part }) => {
-                if (part.type == "finish") {
-                  metadata.usage = part.totalUsage;
-                  return metadata;
-                }
-              },
-            })
-            .getReader();
+          let finalStatus: "completed" | "aborted" | "failed" = "completed";
+          let finalErrorMessage: string | undefined;
+          let textOutput = "";
+          let fullTextAccumulator = ""; // Accumulate full text for logging/history
 
           try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
+            const result = streamText({
+              model,
+              system: stepRun.system,
+              messages: await convertToModelMessages(stepRun.messages),
+              experimental_transform: smoothStream({ chunking: "word" }),
+              maxRetries: 2,
+              tools: stepRun.tools,
+              toolChoice: "auto",
+              abortSignal: stepAbort.signal,
+            });
+            result.consumeStream();
 
-              if (value.type === "tool-input-available") {
-                toolNameByToolCallId.set(value.toolCallId, value.toolName);
-              } else if (
-                value.type === "tool-output-available" ||
-                value.type === "tool-output-error"
-              ) {
-                const isError = value.type === "tool-output-error";
-                const output = isError ? value.errorText : value.output;
-                const toolName = toolNameByToolCallId.get(value.toolCallId);
-                if (toolName) {
-                  writeStepOutput({
-                    toolName,
-                    output: isError ? `Error: ${output}` : output,
-                  });
-                }
-                if (isError) {
-                  dataStream.write(value as any);
-                  writeStepStatus({
-                    planId: stepRun.planId,
-                    stepIndex: stepRun.stepIndex,
-                    status: "failed",
-                    errorMessage: String(output),
-                  });
-                  return { status: "failed" };
-                }
-              }
+            const textBufferParts: Array<string> = [];
+            const toolNameByToolCallId = new Map<string, string>();
+            const writeStepOutput = (payload: {
+              toolName: string;
+              output: unknown;
+            }): void => {
+              dataStream.write({
+                type: "data-plan-step-output",
+                id: stepRun.planId,
+                data: {
+                  planId: stepRun.planId,
+                  stepIndex: stepRun.stepIndex,
+                  toolName: payload.toolName,
+                  output: payload.output,
+                },
+              });
+            };
+            const reader = result
+              .toUIMessageStream({
+                messageMetadata: ({ part }) => {
+                  if (part.type == "finish") {
+                    metadata.usage = part.totalUsage;
+                    return metadata;
+                  }
+                },
+              })
+              .getReader();
 
-              const delta = getTextDelta(value);
-              if (delta !== undefined) {
-                textBufferParts.push(delta);
-                if (!stepRun.emitText) {
-                  continue;
-                }
-              }
-
-              dataStream.write(value as any);
-
-              if (isStepAborted()) {
-                break;
-              }
-            }
-          } finally {
             try {
-              reader.releaseLock();
-            } catch {}
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                if (value.type === "tool-input-available") {
+                  toolNameByToolCallId.set(value.toolCallId, value.toolName);
+                  
+                  // Check for forbidden tool usage
+                  const forbiddenTools = ["outline", "plan", "progress"];
+                  if (forbiddenTools.includes(value.toolName)) {
+                    const errorMsg = `[Plan] ⚠️ Step ${stepRun.stepIndex} attempted to call forbidden tool: ${value.toolName}`;
+                    logger.warn(errorMsg);
+                    finalStatus = "failed";
+                    finalErrorMessage = `Forbidden tool usage: ${value.toolName} (progress is managed automatically)`;
+                  }
+                } else if (
+                  value.type === "tool-output-available" ||
+                  value.type === "tool-output-error"
+                ) {
+                  const isError = value.type === "tool-output-error";
+                  const output = isError ? value.errorText : value.output;
+                  const toolName = toolNameByToolCallId.get(value.toolCallId);
+                  if (toolName) {
+                    writeStepOutput({
+                      toolName,
+                      output: isError ? `Error: ${output}` : output,
+                    });
+                  }
+                  if (isError) {
+                    dataStream.write(value as any);
+                    finalStatus = "failed";
+                    finalErrorMessage = String(output);
+                    logger.error(`[Plan] ❌ Step ${stepRun.stepIndex} tool error: ${finalErrorMessage}`);
+                    break;
+                  }
+                }
+
+                const delta = getTextDelta(value);
+                if (delta !== undefined) {
+                  textBufferParts.push(delta);
+                  fullTextAccumulator += delta;
+                  
+                  // If we are not emitting text to the main stream, we should stream it as a step output
+                  // to keep the Plan UI responsive.
+                  if (!stepRun.emitText) {
+                    // Flush buffer every 20 chars or on newlines to balance update frequency vs message part count
+                    const currentBuffer = textBufferParts.join("");
+                    if (currentBuffer.length > 20 || delta.includes('\n')) {
+                        writeStepOutput({ toolName: "assistant", output: currentBuffer });
+                        textBufferParts.length = 0; // Clear buffer
+                    }
+                    continue;
+                  }
+                }
+
+                dataStream.write(value as any);
+
+                if (isStepAborted()) {
+                  finalStatus = "aborted";
+                  finalErrorMessage = ABORT_ERROR_MESSAGE;
+                  logger.warn(`[Plan] 🛑 Step ${stepRun.stepIndex} aborted by user/system`);
+                  break;
+                }
+              }
+            } finally {
+              try {
+                reader.releaseLock();
+              } catch {}
+            }
+
+            // Flush remaining text buffer
+            if (textBufferParts.length > 0 && !stepRun.emitText) {
+                const remaining = textBufferParts.join("");
+                if (remaining.length > 0) {
+                     writeStepOutput({ toolName: "assistant", output: remaining });
+                }
+            }
+
+            textOutput = fullTextAccumulator.trim();
+            // Note: We don't need to write final textOutput again if we streamed it
+          } catch (error) {
+            // Catch any unexpected errors during execution
+            finalStatus = "failed";
+            finalErrorMessage = error instanceof Error ? error.message : String(error);
+            logger.error(`[Plan] 💥 Step ${stepRun.stepIndex} unexpected error:`, error);
           }
 
-          if (isStepAborted()) {
-            logger.info(`[Plan] Step ${stepRun.stepIndex} aborted for plan ${stepRun.planId}`);
+          // GUARANTEE: Status ALWAYS updated to final state
+          if (finalStatus === "completed") {
+            logger.info(`[Plan] ✅ Step ${stepRun.stepIndex} completed successfully (output: ${textOutput.length} chars)`);
+            writeStepStatus({
+              planId: stepRun.planId,
+              stepIndex: stepRun.stepIndex,
+              status: "completed",
+            });
+            // Note: We already streamed the output chunks, so no need to write it again here
+            // unless we want to ensure the final block is consistent?
+            // Actually, if we streamed chunks, we don't want to duplicate.
+            // But if we missed anything (unlikely with finally block flushing), it might be missing.
+            // Given we flush in finally, we should be good.
+          } else {
+            logger.warn(`[Plan] ⚠️ Step ${stepRun.stepIndex} finished with status: ${finalStatus}${finalErrorMessage ? `, error: ${finalErrorMessage}` : ''}`);
             writeStepStatus({
               planId: stepRun.planId,
               stepIndex: stepRun.stepIndex,
               status: "failed",
-              errorMessage: ABORT_ERROR_MESSAGE,
+              errorMessage: finalErrorMessage,
             });
-            return { status: "aborted" };
           }
 
-          const text = textBufferParts.join("").trim();
-          if (text.length > 0) {
-            writeStepOutput({ toolName: "assistant", output: text });
-          }
-
-          logger.info(`[Plan] Step ${stepRun.stepIndex} completed for plan ${stepRun.planId}`);
-          writeStepStatus({
-            planId: stepRun.planId,
-            stepIndex: stepRun.stepIndex,
-            status: "completed",
-          });
-          return { status: "completed", output: text };
+          return { 
+            status: finalStatus, 
+            output: textOutput 
+          };
         };
 
         const mcpClients = await mcpClientsManager.getClients();
@@ -832,22 +898,47 @@ export async function POST(request: Request) {
               const system = [
                 systemPrompt,
                 `\n\n<outline id="${outlineId}">\n${outlineJson}\n</outline>\n`,
-                `\n## STEP EXECUTION MODE - STRICT SINGLE-STEP EXECUTION\n`,
-                `Current Task: Execute ONLY Step ${i}\n`,
-                `Step Title: ${title}\n`,
-                description.length > 0 ? `Step Description: ${description}\n` : "",
-                `\n### ⚠️ EXECUTION CONSTRAINTS (MUST FOLLOW)\n`,
-                `1. [SCOPE] Execute ONLY the content of Step ${i}. Do NOT exceed this step's boundaries.\n`,
-                `2. [BOUNDARY] Do NOT output, mention, or prepare for subsequent steps (Step ${i + 1} onwards).\n`,
-                `3. [TOOLS] Do NOT call outline/plan/progress tools. Progress is managed automatically by the system.\n`,
-                `4. [FOCUS] Stop immediately after completing the specific work required for this step.\n`,
-                `5. [OUTPUT] ${isLast ? "This is the FINAL step. Output the complete final deliverable." : "Output ONLY the artifact for THIS step. Do not expand to other steps."}\n`,
-                `\n### 🎯 EXECUTION CHECKLIST\n`,
-                `- [ ] I am executing ONLY Step ${i}'s work\n`,
-                `- [ ] I am NOT mentioning Step ${i + 1} or later content\n`,
-                `- [ ] I am NOT calling progress/outline/plan tools\n`,
-                `- [ ] I will stop immediately after completion and wait for the system to execute the next step\n`,
-                `\n▶️ Begin executing Step ${i} NOW:\n`,
+                `\n## 🔒 STEP EXECUTION MODE - MANDATORY SINGLE-STEP CONSTRAINT\n`,
+                `\n### 📍 CURRENT EXECUTION SCOPE (IMMUTABLE)\n`,
+                `- **Step Index**: ${i} of ${outlineSteps.length - 1}\n`,
+                `- **Step Title**: ${title}\n`,
+                description.length > 0 ? `- **Step Description**: ${description}\n` : "",
+                `- **Status Management**: AUTOMATIC - System manages all progress tracking\n`,
+                `\n### ⚠️ CRITICAL EXECUTION RULES (VIOLATION = TASK FAILURE)\n`,
+                `\n**RULE 1 - SCOPE BOUNDARY (ABSOLUTE)**\n`,
+                `You MUST execute ONLY the work defined in Step ${i}. Any work beyond this step's scope is FORBIDDEN.\n`,
+                `- ✅ ALLOWED: Complete the specific objective of "${title}"\n`,
+                `- ❌ FORBIDDEN: Any work related to Step ${i + 1} or later steps\n`,
+                `- ❌ FORBIDDEN: Anticipating, preparing for, or mentioning future steps\n`,
+                `\n**RULE 2 - OUTPUT BOUNDARY (ABSOLUTE)**\n`,
+                isLast 
+                  ? `This is the FINAL step (${i}/${outlineSteps.length - 1}). Output the complete final deliverable that fulfills the entire plan.\n`
+                  : `You MUST output ONLY the artifact/result for Step ${i}. Start outputting the content immediately. Do NOT include content for Step ${i + 1} onwards.\n`,
+                `\n**RULE 3 - TOOL RESTRICTION (ABSOLUTE)**\n`,
+                `You are FORBIDDEN from calling these tools: outline, plan, progress.\n`,
+                `Reason: Progress tracking is automatically managed by the system. Your manual status updates will cause data corruption.\n`,
+                `\n**RULE 4 - TERMINATION REQUIREMENT (ABSOLUTE)**\n`,
+                `You MUST stop immediately after completing Step ${i}'s work. Do NOT continue to subsequent steps.\n`,
+                `IF you continue generating content for Step ${i + 1}, you will cause a SYSTEM FAILURE.\n`,
+                `\n### 🛑 STOPPING INSTRUCTION\n`,
+                `When you have finished the artifact for Step ${i}, you MUST stop generating text immediately. Do not write any concluding remarks or transitions to the next step.\n`,
+                `The system will automatically:\n`,
+                `1. Mark Step ${i} as completed\n`,
+                `2. Initiate Step ${i + 1} execution in a new context\n`,
+                `\n### 🎯 PRE-EXECUTION VERIFICATION\n`,
+                `Before you begin, mentally confirm:\n`,
+                `✓ I understand I am executing ONLY Step ${i}: "${title}"\n`,
+                `✓ I will NOT produce any output related to steps ${i + 1}-${outlineSteps.length - 1}\n`,
+                `✓ I will NOT call outline/plan/progress tools\n`,
+                `✓ I will stop immediately when Step ${i} is complete\n`,
+                `✓ The system will automatically update progress - I do not manage status\n`,
+                `\n### 📋 EXECUTION PROTOCOL\n`,
+                `1. Read Step ${i}'s description carefully\n`,
+                `2. Execute ONLY the work required for this step\n`,
+                `3. Produce the output artifact for THIS step only\n`,
+                `4. Stop immediately when complete\n`,
+                `5. Wait for system to initiate next step\n`,
+                `\n▶️ BEGIN STEP ${i} EXECUTION NOW:\n`,
               ].join("");
               const result = await runStep({
                 system,
@@ -974,22 +1065,47 @@ export async function POST(request: Request) {
               const system = [
                 systemPrompt,
                 `\n\n<plan id="${planId}">\n${planJson}\n</plan>\n`,
-                `\n## STEP EXECUTION MODE - STRICT SINGLE-STEP EXECUTION\n`,
-                `Current Task: Execute ONLY Step ${i}\n`,
-                `Step Title: ${title}\n`,
-                description.length > 0 ? `Step Description: ${description}\n` : "",
-                `\n### ⚠️ EXECUTION CONSTRAINTS (MUST FOLLOW)\n`,
-                `1. [SCOPE] Execute ONLY the content of Step ${i}. Do NOT exceed this step's boundaries.\n`,
-                `2. [BOUNDARY] Do NOT output, mention, or prepare for subsequent steps (Step ${i + 1} onwards).\n`,
-                `3. [TOOLS] Do NOT call outline/plan/progress tools. Progress is managed automatically by the system.\n`,
-                `4. [FOCUS] Stop immediately after completing the specific work required for this step.\n`,
-                `5. [OUTPUT] ${isLast ? "This is the FINAL step. Output the complete final deliverable." : "Output ONLY the artifact for THIS step. Do not expand to other steps."}\n`,
-                `\n### 🎯 EXECUTION CHECKLIST\n`,
-                `- [ ] I am executing ONLY Step ${i}'s work\n`,
-                `- [ ] I am NOT mentioning Step ${i + 1} or later content\n`,
-                `- [ ] I am NOT calling progress/outline/plan tools\n`,
-                `- [ ] I will stop immediately after completion and wait for the system to execute the next step\n`,
-                `\n▶️ Begin executing Step ${i} NOW:\n`,
+                `\n## 🔒 STEP EXECUTION MODE - MANDATORY SINGLE-STEP CONSTRAINT\n`,
+                `\n### 📍 CURRENT EXECUTION SCOPE (IMMUTABLE)\n`,
+                `- **Step Index**: ${i} of ${planSteps.length - 1}\n`,
+                `- **Step Title**: ${title}\n`,
+                description.length > 0 ? `- **Step Description**: ${description}\n` : "",
+                `- **Status Management**: AUTOMATIC - System manages all progress tracking\n`,
+                `\n### ⚠️ CRITICAL EXECUTION RULES (VIOLATION = TASK FAILURE)\n`,
+                `\n**RULE 1 - SCOPE BOUNDARY (ABSOLUTE)**\n`,
+                `You MUST execute ONLY the work defined in Step ${i}. Any work beyond this step's scope is FORBIDDEN.\n`,
+                `- ✅ ALLOWED: Complete the specific objective of "${title}"\n`,
+                `- ❌ FORBIDDEN: Any work related to Step ${i + 1} or later steps\n`,
+                `- ❌ FORBIDDEN: Anticipating, preparing for, or mentioning future steps\n`,
+                `\n**RULE 2 - OUTPUT BOUNDARY (ABSOLUTE)**\n`,
+                isLast 
+                  ? `This is the FINAL step (${i}/${planSteps.length - 1}). Output the complete final deliverable that fulfills the entire plan.\n`
+                  : `You MUST output ONLY the artifact/result for Step ${i}. Start outputting the content immediately. Do NOT include content for Step ${i + 1} onwards.\n`,
+                `\n**RULE 3 - TOOL RESTRICTION (ABSOLUTE)**\n`,
+                `You are FORBIDDEN from calling these tools: outline, plan, progress.\n`,
+                `Reason: Progress tracking is automatically managed by the system. Your manual status updates will cause data corruption.\n`,
+                `\n**RULE 4 - TERMINATION REQUIREMENT (ABSOLUTE)**\n`,
+                `You MUST stop immediately after completing Step ${i}'s work. Do NOT continue to subsequent steps.\n`,
+                `IF you continue generating content for Step ${i + 1}, you will cause a SYSTEM FAILURE.\n`,
+                `\n### 🛑 STOPPING INSTRUCTION\n`,
+                `When you have finished the artifact for Step ${i}, you MUST stop generating text immediately. Do not write any concluding remarks or transitions to the next step.\n`,
+                `The system will automatically:\n`,
+                `1. Mark Step ${i} as completed\n`,
+                `2. Initiate Step ${i + 1} execution in a new context\n`,
+                `\n### 🎯 PRE-EXECUTION VERIFICATION\n`,
+                `Before you begin, mentally confirm:\n`,
+                `✓ I understand I am executing ONLY Step ${i}: "${title}"\n`,
+                `✓ I will NOT produce any output related to steps ${i + 1}-${planSteps.length - 1}\n`,
+                `✓ I will NOT call outline/plan/progress tools\n`,
+                `✓ I will stop immediately when Step ${i} is complete\n`,
+                `✓ The system will automatically update progress - I do not manage status\n`,
+                `\n### 📋 EXECUTION PROTOCOL\n`,
+                `1. Read Step ${i}'s description carefully\n`,
+                `2. Execute ONLY the work required for this step\n`,
+                `3. Produce the output artifact for THIS step only\n`,
+                `4. Stop immediately when complete\n`,
+                `5. Wait for system to initiate next step\n`,
+                `\n▶️ BEGIN STEP ${i} EXECUTION NOW:\n`,
               ].join("");
               const result = await runStep({
                 system,

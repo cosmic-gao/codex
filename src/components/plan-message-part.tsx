@@ -446,7 +446,37 @@ const PlanStepItem = memo(({
   }, [status, progressStep?.errorMessage]);
   
   const displayActions = actions && actions.length > 0 ? actions : ("actions" in step ? step.actions : undefined);
-  const displayOutputs = outputs ?? [];
+  
+  // Merge consecutive "assistant" outputs to support streaming updates
+  const displayOutputs = useMemo(() => {
+    if (!outputs || outputs.length === 0) return [];
+    
+    const merged: Array<{ toolName?: string; output: unknown }> = [];
+    let lastAssistantIndex = -1;
+
+    outputs.forEach((item) => {
+      // If it's an assistant text output
+      if (item.toolName === 'assistant' && typeof item.output === 'string') {
+        if (lastAssistantIndex !== -1) {
+          // Merge with previous assistant output
+          const prev = merged[lastAssistantIndex];
+          if (typeof prev.output === 'string') {
+            prev.output += item.output;
+            return; // Skip adding new item
+          }
+        }
+        // New assistant block
+        lastAssistantIndex = merged.length;
+        merged.push({ ...item }); // Clone to avoid mutation
+      } else {
+        // Other tools or non-string output - just add
+        lastAssistantIndex = -1;
+        merged.push(item);
+      }
+    });
+    
+    return merged;
+  }, [outputs]);
 
   const errorText = useMemo(() => {
     const message = progressStep?.errorMessage;
@@ -706,22 +736,89 @@ function PurePlanMessagePart({
   const steps = plan.steps || [];
 
   // Default progress if not provided
-  const progress = useMemo(() => 
-    inputProgress ??
-    ({
-      planId,
-      steps: steps.map(() => ({ 
-        status: "pending" as const, 
-        actions: undefined,
-        startTime: undefined,
-        endTime: undefined,
-        toolCalls: undefined,
-        errorMessage: undefined,
-      })),
-      currentStepIndex: steps.length ? 0 : undefined,
-    } satisfies PlanProgress),
-    [inputProgress, planId, steps]
-  );
+  const progress = useMemo(() => {
+    const baseProgress = inputProgress ??
+      ({
+        planId,
+        steps: steps.map(() => ({
+          status: "pending" as const,
+          actions: undefined,
+          startTime: undefined,
+          endTime: undefined,
+          toolCalls: undefined,
+          errorMessage: undefined,
+        })),
+        currentStepIndex: steps.length ? 0 : undefined,
+      } satisfies PlanProgress);
+
+    // Sync status with outputs: infer status from output presence and timing
+    if (stepOutputs || baseProgress.steps.some(s => s.startTime || s.endTime)) {
+      // Find the index of the latest step that has any activity (output or start time)
+      let latestActiveIndex = -1;
+      
+      // Check outputs
+      if (stepOutputs) {
+        stepOutputs.forEach((outputs, index) => {
+          if (outputs && outputs.length > 0) {
+            latestActiveIndex = Math.max(latestActiveIndex, index);
+          }
+        });
+      }
+
+      // Check timing
+      baseProgress.steps.forEach((step, index) => {
+        if (step.startTime) {
+          latestActiveIndex = Math.max(latestActiveIndex, index);
+        }
+      });
+
+      if (latestActiveIndex >= 0) {
+        const newSteps = baseProgress.steps.map((step, index) => {
+          // 1. Infer completion from endTime
+          if (step.endTime && (step.status === 'pending' || step.status === 'in_progress')) {
+             return { ...step, status: 'completed' as const };
+          }
+
+          // 2. Previous steps should be completed if they are not failed/aborted
+          // We assume sequential execution: if step N is active, N-1 must be done
+          if (index < latestActiveIndex) {
+            if (step.status === "pending" || step.status === "in_progress") {
+              return { ...step, status: "completed" as const };
+            }
+          }
+          
+          // 3. The current active step should be at least in_progress
+          if (index === latestActiveIndex) {
+            if (step.status === "pending") {
+              return { ...step, status: "in_progress" as const };
+            }
+          }
+          
+          // 4. Infer in_progress from startTime
+          if (step.startTime && step.status === 'pending') {
+              return { ...step, status: 'in_progress' as const };
+          }
+          
+          return step;
+        });
+
+        const newCurrentStepIndex = Math.max(baseProgress.currentStepIndex ?? 0, latestActiveIndex);
+
+        if (
+          newSteps.some((s, i) => s !== baseProgress.steps[i]) ||
+          newCurrentStepIndex !== baseProgress.currentStepIndex
+        ) {
+          return {
+            ...baseProgress,
+            steps: newSteps,
+            currentStepIndex: newCurrentStepIndex,
+          };
+        }
+      }
+    }
+
+    return baseProgress;
+  }, [inputProgress, planId, steps, stepOutputs]);
 
   // Calculate metrics for header
   const metrics = useMemo(() => {
