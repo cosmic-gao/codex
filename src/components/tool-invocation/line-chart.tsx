@@ -9,7 +9,6 @@ import {
   XAxis,
   YAxis,
   Legend,
-  ResponsiveContainer,
 } from "recharts";
 
 import {
@@ -146,48 +145,46 @@ export function LineChart(props: LineChartProps) {
       </CardHeader>
       <CardContent>
         <div>
-          <ChartContainer config={chartConfig}>
-            <ResponsiveContainer width="100%" height={400}>
-              <RechartsLineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="label"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={8}
+          <ChartContainer config={chartConfig} className="h-[400px]">
+            <RechartsLineChart data={chartData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis
+                dataKey="label"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={8}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tickMargin={10}
+                label={
+                  yAxisLabel
+                    ? {
+                      value: yAxisLabel,
+                      angle: -90,
+                      position: "insideLeft",
+                    }
+                    : undefined
+                }
+              />
+              <ChartTooltip
+                cursor={false}
+                content={<ChartTooltipContent />}
+              />
+              <Legend />
+              {seriesNames.map((seriesName, index) => (
+                <Line
+                  key={index}
+                  type="monotone"
+                  name={seriesName}
+                  dataKey={sanitizeCssVariableName(seriesName)}
+                  stroke={`var(--color-${sanitizeCssVariableName(seriesName)})`}
+                  strokeWidth={2}
+                  dot={false}
                 />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={10}
-                  label={
-                    yAxisLabel
-                      ? {
-                          value: yAxisLabel,
-                          angle: -90,
-                          position: "insideLeft",
-                        }
-                      : undefined
-                  }
-                />
-                <ChartTooltip
-                  cursor={false}
-                  content={<ChartTooltipContent />}
-                />
-                <Legend />
-                {seriesNames.map((seriesName, index) => (
-                  <Line
-                    key={index}
-                    type="monotone"
-                    name={seriesName}
-                    dataKey={sanitizeCssVariableName(seriesName)}
-                    stroke={`var(--color-${sanitizeCssVariableName(seriesName)})`}
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                ))}
-              </RechartsLineChart>
-            </ResponsiveContainer>
+              ))}
+            </RechartsLineChart>
           </ChartContainer>
         </div>
       </CardContent>

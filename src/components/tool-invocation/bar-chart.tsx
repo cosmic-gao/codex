@@ -7,7 +7,6 @@ import {
   XAxis,
   YAxis,
   BarChart as RechartsBarChart,
-  ResponsiveContainer,
 } from "recharts";
 
 import {
@@ -144,46 +143,45 @@ export function BarChart(props: BarChartProps) {
       </CardHeader>
       <CardContent>
         <div>
-          <ChartContainer config={chartConfig}>
-            <ResponsiveContainer width="100%" height={400}>
-              <RechartsBarChart data={chartData}>
-                <CartesianGrid vertical={false} />
-                <XAxis
-                  dataKey="name"
-                  tickLine={false}
-                  tickMargin={10}
-                  axisLine={false}
-                />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={10}
-                  label={
-                    yAxisLabel
-                      ? {
-                          value: yAxisLabel,
-                          angle: -90,
-                          position: "insideLeft",
-                        }
-                      : undefined
-                  }
-                />
-                <ChartTooltip
-                  cursor={false}
-                  content={<ChartTooltipContent indicator="dashed" />}
-                />
-                {seriesNames.map((seriesName, index) => {
-                  return (
-                    <Bar
-                      key={index}
-                      dataKey={sanitizeCssVariableName(seriesName)}
-                      fill={`var(--color-${sanitizeCssVariableName(seriesName)})`}
-                      radius={4}
-                    />
-                  );
-                })}
-              </RechartsBarChart>
-            </ResponsiveContainer>
+          <ChartContainer config={chartConfig} className="h-[400px]">
+            <RechartsBarChart data={chartData}>
+              <CartesianGrid vertical={false} />
+              <XAxis
+                dataKey="name"
+                tickLine={false}
+                tickMargin={10}
+                axisLine={false}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tickMargin={10}
+                label={
+                  yAxisLabel
+                    ? {
+                      value: yAxisLabel,
+                      angle: -90,
+                      position: "insideLeft",
+                    }
+                    : undefined
+                }
+              />
+              <ChartTooltip
+                cursor={false}
+                content={<ChartTooltipContent indicator="dashed" />}
+              />
+              {seriesNames.map((seriesName, index) => {
+                return (
+                  <Bar
+                    key={index}
+                    dataKey={sanitizeCssVariableName(seriesName)}
+                    fill={`var(--color-${sanitizeCssVariableName(seriesName)})`}
+                    radius={4}
+                  />
+                );
+              })}
+            </RechartsBarChart>
+
           </ChartContainer>
         </div>
       </CardContent>
