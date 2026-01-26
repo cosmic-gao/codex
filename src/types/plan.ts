@@ -72,6 +72,8 @@ export const OutlineStepSchema = z.object({
   description: z.string().optional(),
   /** Dependencies: indices of steps that must complete before this one */
   dependsOn: z.array(z.number().int().nonnegative()).optional(),
+  /** Priority: high/medium/low */
+  priority: z.enum(["high", "medium", "low"]).default("medium").optional(),
   /** Complexity score: 1=simple, 2=moderate, 3=complex */
   complexity: z.enum(["1", "2", "3"]).optional(),
   /** Estimated duration in seconds */
